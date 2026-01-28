@@ -1,0 +1,19 @@
+[package]
+name = "codecs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "binary_codec"
+harness = false
+

@@ -1,0 +1,21 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+admin_http = { path = "../admin_http"}
+crossbeam-channel.workspace = true
+tracing.workspace = true
+slab.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+crossbeam-channel.workspace = true
+
+[[bench]]
+name = "engine_step"
+harness = false
+

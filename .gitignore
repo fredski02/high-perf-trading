@@ -1,0 +1,82 @@
+# =========================================
+# Rust / Cargo
+# =========================================
+
+# Compiled artifacts
+/target/
+
+# Cargo lock (keep for binaries, ignore for libs if you prefer)
+# For applications: COMMIT THIS
+# For libraries: you may ignore
+# Cargo.lock
+
+# Backup files
+**/*.rs.bk
+
+# Rustfmt backups
+**/*.rs.orig
+
+# =========================================
+# IDE / Editor
+# =========================================
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
+*.iml
+
+# Neovim swap/undo
+*.swp
+*.swo
+*~
+Session.vim
+
+# =========================================
+# OS junk
+# =========================================
+
+.DS_Store
+Thumbs.db
+
+# =========================================
+# Logs / temp
+# =========================================
+
+*.log
+*.tmp
+*.temp
+
+# =========================================
+# Env / secrets
+# =========================================
+
+.env
+.env.*
+!.env.example
+
+# =========================================
+# Docker / builds
+# =========================================
+
+docker-compose.override.yml
+*.local.yml
+
+# =========================================
+# Coverage / testing
+# =========================================
+
+coverage/
+tarpaulin-report.html
+*.profraw
+*.profdata
+
+# =========================================
+# Misc
+# =========================================
+
+dist/
+build/
+.cache/
+
