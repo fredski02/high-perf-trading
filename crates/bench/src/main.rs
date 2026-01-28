@@ -56,6 +56,10 @@ async fn main() -> anyhow::Result<()> {
         "bench-bin" => {
             bench_bin(&args.bin_addr, args.iters).await?;
         }
+        "smoke-replay" => {
+            smoke_replay_json(&args.json_addr).await?;
+            println!("smoke-replay ok");
+        }
         other => anyhow::bail!("unknown mode: {other}"),
     }
 
@@ -393,4 +397,52 @@ async fn read_n_events_json(s: &mut TcpStream, n: usize) -> anyhow::Result<Vec<E
         out.push(ev);
     }
     Ok(out)
+}
+
+// -------------------- Smoke: replay scenario --------------------
+//
+// Sends ONLY a crossing taker buy.
+// This should only fill if the server restarted and replayed a resting ask from the journal.
+//
+// Assumptions:
+// - symbol_id=1
+// - there exists a resting ask at 100 (e.g. from previous smoke-all run)
+//
+// Behavior:
+// - expects at least one Fill for this taker order_id
+async fn smoke_replay_json(addr: &str) -> anyhow::Result<()> {
+    let mut s = TcpStream::connect(addr).await?;
+
+    // taker: buy 110 x1
+    let buy = Command::NewOrder(NewOrder {
+        client_seq: 1,
+        order_id: 9001,
+        account_id: 42,
+        symbol_id: 1,
+        side: Side::Buy,
+        price: 110,
+        qty: 1,
+        tif: TimeInForce::Gtc,
+        flags: OrderFlags { post_only: false },
+    });
+
+    write_json_cmd(&mut s, &buy).await?;
+
+    // Read until ACK for client_seq=1, collecting everything.
+    let events = read_until_ack_json(&mut s, 1).await?;
+
+    let saw_fill = events.iter().any(|ev| match ev {
+        Event::Fill(f) => f.taker_order_id == 9001 && f.qty >= 1,
+        _ => false,
+    });
+
+    if !saw_fill {
+        anyhow::bail!(
+            "smoke-replay failed: no fill observed (book likely not replayed). Events:\n{:#?}",
+            events
+        );
+    }
+
+    println!("smoke-replay events:\n{:#?}", events);
+    Ok(())
 }

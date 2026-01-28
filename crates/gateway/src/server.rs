@@ -10,9 +10,10 @@ use admin_http::metrics::Metrics;
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use codecs::{BinaryCodec, Codec, JsonCodec};
+use common::{Event, ProtoError, Reject, RejectReason};
 use crossbeam_channel as cb;
 use engine::{Engine, Inbound, Outbound};
-use std::sync::atomic::Ordering as AtomicOrdering;
+use persistence::Journal;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -20,8 +21,6 @@ use tokio::{
     sync::mpsc,
 };
 use tracing::{info, warn};
-
-use common::{Event, ProtoError, Reject, RejectReason};
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -109,37 +108,47 @@ impl Clone for ConnEntry {
 }
 
 pub async fn run(args: crate::Args) -> anyhow::Result<()> {
+    let journal = Arc::new(Mutex::new(Journal::open(&args.journal_path)?));
+    let replay_cmds = {
+        let mut j = journal.lock().unwrap();
+        j.read_all()?
+    };
+
     let metrics = Arc::new(Metrics::default());
-    let admin_addr = args.admin_addr.clone(); // or whatever you call it
+
+    // spawn admin_http in-process
+    let admin_addr = args.admin_addr.clone();
     let metrics_admin = metrics.clone();
     tokio::spawn(async move {
         if let Err(e) = admin_http::server::run(admin_addr, metrics_admin).await {
             tracing::warn!("admin_http failed: {e:#}");
         }
     });
+
     let (in_tx, in_rx) = cb::bounded::<Inbound>(args.ingress_cap);
     let (out_tx, out_rx) = cb::unbounded::<Outbound>();
+
+    // ✅ engine thread
     let metrics_r = metrics.clone();
     std::thread::Builder::new()
         .name("engine".into())
-        .spawn(move || Engine::new(in_rx, out_tx, metrics_r).run())
+        .spawn(move || {
+            let mut e = Engine::new(in_rx, out_tx, metrics_r);
+            e.replay(replay_cmds);
+            e.run();
+        })
         .context("spawn engine")?;
 
+    // router uses the same metrics
     let router = Arc::new(Router::new(out_rx, args.max_frame, metrics.clone()));
-    {
+    tokio::spawn({
         let r = router.clone();
-        tokio::spawn(async move {
-            r.run().await;
-        });
-    }
+        async move { r.run().await }
+    });
 
+    // listeners need journal too
     let bin_codec: Arc<dyn Codec> = Arc::new(BinaryCodec::default());
     let json_codec: Arc<dyn Codec> = Arc::new(JsonCodec::default());
-
-    info!(
-        "gateway up: binary={} json={}",
-        args.binary_addr, args.json_addr
-    );
 
     tokio::spawn(run_listener(
         args.binary_addr.clone(),
@@ -148,7 +157,9 @@ pub async fn run(args: crate::Args) -> anyhow::Result<()> {
         router.clone(),
         metrics.clone(),
         args.max_frame,
+        journal.clone(),
     ));
+
     tokio::spawn(run_listener(
         args.json_addr.clone(),
         json_codec,
@@ -156,6 +167,7 @@ pub async fn run(args: crate::Args) -> anyhow::Result<()> {
         router.clone(),
         metrics.clone(),
         args.max_frame,
+        journal.clone(),
     ));
 
     tokio::signal::ctrl_c().await?;
@@ -169,6 +181,7 @@ async fn run_listener(
     router: Arc<Router>,
     metrics: Arc<Metrics>,
     max_frame: usize,
+    journal: Arc<Mutex<Journal>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     info!("listening {} ({})", addr, codec.name());
@@ -200,6 +213,7 @@ async fn run_listener(
         let codec_r = codec.clone();
         let engine_in_r = engine_in.clone();
         let metrics_r = metrics.clone();
+        let journal_r = journal.clone();
 
         tokio::spawn(async move {
             if let Err(_e) = read_loop(
@@ -210,6 +224,7 @@ async fn run_listener(
                 router_r,
                 metrics_r,
                 max_frame,
+                journal_r,
             )
             .await
             {
@@ -226,6 +241,7 @@ async fn read_loop(
     router: Arc<Router>,
     metrics: Arc<Metrics>,
     max_frame: usize,
+    journal: Arc<Mutex<Journal>>,
 ) -> Result<(), ProtoError> {
     let mut buf = BytesMut::with_capacity(16 * 1024);
     let mut temp = [0u8; 8192];
@@ -248,10 +264,20 @@ async fn read_loop(
                         Ok(c) => c,
                         Err(_) => continue,
                     };
-
-                    match engine_in.try_send(Inbound { conn_id, cmd }) {
+                    match engine_in.try_send(Inbound {
+                        conn_id,
+                        cmd: cmd.clone(),
+                    }) {
                         Ok(()) => {
                             metrics.queue_inc();
+
+                            // ✅ journal only commands that made it into the engine queue
+                            if let Ok(mut j) = journal.lock() {
+                                if let Err(e) = j.append(&cmd) {
+                                    warn!("journal append failed: {e:#}");
+                                    // For now we keep going. If you want strict durability, reject instead.
+                                }
+                            }
                         }
                         Err(_) => {
                             let client_seq = match &cmd {

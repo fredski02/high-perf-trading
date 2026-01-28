@@ -13,6 +13,9 @@ pub struct Args {
     #[arg(long, default_value = "0.0.0.0:8080")]
     pub admin_addr: String,
 
+    #[arg(long, default_value = "journal.bin")]
+    pub journal_path: String,
+
     /// max framed payload size
     #[arg(long, default_value_t = 64 * 1024)]
     pub max_frame: usize,

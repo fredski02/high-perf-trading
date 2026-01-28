@@ -9,7 +9,7 @@ common = { path = "../common" }
 engine = { path = "../engine" }
 codecs = { path = "../codecs" }
 admin_http = { path = "../admin_http"}
-
+persistence = { path = "../persistence" }
 tokio.workspace = true
 bytes.workspace = true
 crossbeam-channel.workspace = true

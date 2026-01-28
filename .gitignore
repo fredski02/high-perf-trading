@@ -47,6 +47,7 @@ Thumbs.db
 *.log
 *.tmp
 *.temp
+journal.bin
 
 # =========================================
 # Env / secrets

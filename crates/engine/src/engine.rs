@@ -254,4 +254,30 @@ impl Engine {
         self.server_seq += 1;
         s
     }
+
+    pub fn replay<I>(&mut self, cmds: I)
+    where
+        I: IntoIterator<Item = common::Command>,
+    {
+        for cmd in cmds {
+            match cmd {
+                common::Command::NewOrder(no) => {
+                    // Re-apply matching + book updates, but ignore emitted events.
+                    // This keeps book correct.
+                    let _ = self.handle_new(no);
+                }
+                common::Command::Cancel(c) => {
+                    let _ = self.book.cancel(c.order_id, c.account_id);
+                }
+                common::Command::Replace(r) => {
+                    // Use your real replace path (infer side), but ignore emitted events.
+                    let _ = self.process(common::Command::Replace(r));
+                }
+            }
+        }
+
+        // After replay, reset server_seq if you persisted it elsewhere.
+        // For now, server_seq continues from 1, which is fine for a demo.
+        // Better: persist server_seq in a checkpoint/snapshot later.
+    }
 }
