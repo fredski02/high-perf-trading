@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use admin_http::metrics::Metrics;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 use common::{Command, NewOrder, OrderFlags, Side, TimeInForce};
@@ -5,9 +8,10 @@ use engine::Engine;
 
 fn bench_engine_process(c: &mut Criterion) {
     // Dummy channels (not used in process bench)
+    let metrics = Arc::new(Metrics::default());
     let (tx_in, rx_in) = crossbeam_channel::bounded(1);
     let (tx_out, _rx_out) = crossbeam_channel::bounded(1);
-    let mut eng = Engine::new(rx_in, tx_out);
+    let mut eng = Engine::new(rx_in, tx_out, metrics);
 
     let cmd = Command::NewOrder(NewOrder {
         client_seq: 1,

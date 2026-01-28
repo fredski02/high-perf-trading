@@ -105,7 +105,7 @@ pub struct Fill {
     pub qty: Qty,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub struct BookTop {
     pub server_seq: u64,
     pub symbol_id: SymbolId,
