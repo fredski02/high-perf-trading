@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use slab::Slab;
+use serde::{Deserialize, Serialize};
 
 use common::{AccountId, OrderFlags, OrderId, Price, Qty, Side, SymbolId, TimeInForce};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
     pub order_id: OrderId,
     pub account_id: AccountId,
@@ -321,6 +322,43 @@ impl OrderBook {
             // else skip cancelled/removed
         }
         None
+    }
+
+    /// Count live orders in the book
+    pub fn live_order_count(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Serialize order book state to bytes for snapshotting
+    pub fn serialize_snapshot(&self) -> anyhow::Result<Vec<u8>> {
+        // Collect all live orders
+        let live_orders: Vec<Order> = self.orders
+            .iter()
+            .filter(|(_, o)| o.qty_rem > 0)
+            .map(|(_, o)| o.clone())
+            .collect();
+
+        postcard::to_stdvec(&live_orders)
+            .map_err(|e| anyhow::anyhow!("snapshot serialize failed: {}", e))
+    }
+
+    /// Restore order book from snapshot bytes
+    pub fn restore_from_snapshot(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        let orders: Vec<Order> = postcard::from_bytes(data)
+            .map_err(|e| anyhow::anyhow!("snapshot deserialize failed: {}", e))?;
+
+        // Clear existing state
+        self.bids.clear();
+        self.asks.clear();
+        self.orders.clear();
+        self.index.clear();
+
+        // Re-insert all orders
+        for order in orders {
+            self.insert_resting(order);
+        }
+
+        Ok(())
     }
 }
 

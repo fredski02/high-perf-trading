@@ -12,8 +12,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use codecs::{BinaryCodec, Codec, JsonCodec};
 use common::{Event, ProtoError, Reject, RejectReason};
 use crossbeam_channel as cb;
-use engine::{Engine, Inbound, Outbound};
-use persistence::Journal;
+use engine::{Engine, EngineConfig, Inbound, Outbound};
+use persistence::JournalConfig;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -109,12 +109,6 @@ impl Clone for ConnEntry {
 }
 
 pub async fn run(args: crate::Args) -> anyhow::Result<()> {
-    let journal = Arc::new(Mutex::new(Journal::open(&args.journal_path)?));
-    let replay_cmds = {
-        let mut j = journal.lock().unwrap();
-        j.read_all()?
-    };
-
     let metrics = Arc::new(Metrics::default());
 
     // spawn admin_http in-process
@@ -129,13 +123,34 @@ pub async fn run(args: crate::Args) -> anyhow::Result<()> {
     let (in_tx, in_rx) = cb::bounded::<Inbound>(args.ingress_cap);
     let (out_tx, out_rx) = cb::unbounded::<Outbound>();
 
-    // ✅ engine thread
-    let metrics_r = metrics.clone();
+    // ✅ engine thread with persistence
+    let metrics_e = metrics.clone();
+    let journal_path = args.journal_path.clone();
+    let snapshot_dir = args.snapshot_dir.clone();
+    let batch_size = args.journal_batch_size;
+    let snapshot_interval = args.snapshot_interval;
+    
     std::thread::Builder::new()
         .name("engine".into())
         .spawn(move || {
-            let mut e = Engine::new(in_rx, out_tx, metrics_r);
-            e.replay(replay_cmds);
+            let engine_config = EngineConfig {
+                journal_path,
+                snapshot_dir,
+                journal_config: JournalConfig {
+                    batch_size,
+                    sync_interval: std::time::Duration::from_millis(100),
+                    rotation_threshold: 1_000_000,
+                },
+                snapshot_interval,
+            };
+            
+            let mut e = Engine::new_with_config(in_rx, out_tx, metrics_e, engine_config);
+            
+            // Restore from persistence (snapshot + journal replay)
+            if let Err(err) = e.restore_from_persistence() {
+                warn!("failed to restore from persistence: {:#}", err);
+            }
+            
             e.run();
         })
         .context("spawn engine")?;
@@ -147,7 +162,7 @@ pub async fn run(args: crate::Args) -> anyhow::Result<()> {
         async move { r.run().await }
     });
 
-    // listeners need journal too
+    // listeners
     let bin_codec: Arc<dyn Codec> = Arc::new(BinaryCodec);
     let json_codec: Arc<dyn Codec> = Arc::new(JsonCodec);
 
@@ -158,7 +173,6 @@ pub async fn run(args: crate::Args) -> anyhow::Result<()> {
         router.clone(),
         metrics.clone(),
         args.max_frame,
-        journal.clone(),
     ));
 
     tokio::spawn(run_listener(
@@ -168,7 +182,6 @@ pub async fn run(args: crate::Args) -> anyhow::Result<()> {
         router.clone(),
         metrics.clone(),
         args.max_frame,
-        journal.clone(),
     ));
 
     tokio::signal::ctrl_c().await?;
@@ -182,7 +195,6 @@ async fn run_listener(
     router: Arc<Router>,
     metrics: Arc<Metrics>,
     max_frame: usize,
-    journal: Arc<Mutex<Journal>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     info!("listening {} ({})", addr, codec.name());
@@ -214,7 +226,6 @@ async fn run_listener(
         let codec_r = codec.clone();
         let engine_in_r = engine_in.clone();
         let metrics_r = metrics.clone();
-        let journal_r = journal.clone();
 
         tokio::spawn(async move {
             if let Err(_e) = read_loop(
@@ -225,7 +236,6 @@ async fn run_listener(
                 router_r,
                 metrics_r,
                 max_frame,
-                journal_r,
             )
             .await
             {
@@ -235,7 +245,6 @@ async fn run_listener(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn read_loop(
     mut rd: OwnedReadHalf,
     conn_id: u64,
@@ -244,7 +253,6 @@ async fn read_loop(
     router: Arc<Router>,
     metrics: Arc<Metrics>,
     max_frame: usize,
-    journal: Arc<Mutex<Journal>>,
 ) -> Result<(), ProtoError> {
     let mut buf = BytesMut::with_capacity(16 * 1024);
     let mut temp = [0u8; 8192];
@@ -266,15 +274,9 @@ async fn read_loop(
                 Err(_) => continue,
             };
 
+            // Send to engine (engine handles journaling)
             if engine_in.try_send(Inbound { conn_id, cmd }).is_ok() {
                 metrics.queue_inc();
-
-                // ✅ journal only commands that made it into the engine queue
-                if let Ok(mut j) = journal.lock() {
-                    if let Err(e) = j.append(&cmd) {
-                        warn!("journal append failed: {e:#}");
-                    }
-                }
             } else {
                 let client_seq = match &cmd {
                     common::Command::NewOrder(x) => x.client_seq,
@@ -289,6 +291,7 @@ async fn read_loop(
     router.unregister(conn_id);
     Ok(())
 }
+
 fn try_read_frame(buf: &mut BytesMut, max_frame: usize) -> Result<Option<Bytes>, ProtoError> {
     if buf.len() < 4 {
         return Ok(None);

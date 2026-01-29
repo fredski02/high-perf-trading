@@ -13,6 +13,13 @@ pub struct Metrics {
 
     // gauge (can go up/down)
     pub engine_in_queue_depth: AtomicI64,
+
+    // Persistence metrics
+    pub journal_appends_total: AtomicU64,
+    pub journal_flushes_total: AtomicU64,
+    pub journal_errors_total: AtomicU64,
+    pub snapshots_total: AtomicU64,
+    pub journal_rotations_total: AtomicU64,
 }
 
 impl Metrics {
@@ -53,6 +60,31 @@ impl Metrics {
         self.engine_in_queue_depth.fetch_sub(1, Ordering::Relaxed);
     }
 
+    #[inline]
+    pub fn inc_journal_appends(&self) {
+        self.journal_appends_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_journal_flushes(&self) {
+        self.journal_flushes_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_journal_errors(&self) {
+        self.journal_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_snapshots(&self) {
+        self.snapshots_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn inc_journal_rotations(&self) {
+        self.journal_rotations_total.fetch_add(1, Ordering::Relaxed);
+    }
+
     // ---- Prometheus text ----
 
     pub fn render_prom_text(&self) -> String {
@@ -64,6 +96,12 @@ impl Metrics {
         let rejects = self.rejects_total.load(Ordering::Relaxed);
         let depth = self.engine_in_queue_depth.load(Ordering::Relaxed);
 
+        let journal_appends = self.journal_appends_total.load(Ordering::Relaxed);
+        let journal_flushes = self.journal_flushes_total.load(Ordering::Relaxed);
+        let journal_errors = self.journal_errors_total.load(Ordering::Relaxed);
+        let snapshots = self.snapshots_total.load(Ordering::Relaxed);
+        let rotations = self.journal_rotations_total.load(Ordering::Relaxed);
+
         format!(
             "\
             exchange_connections {}
@@ -72,8 +110,14 @@ impl Metrics {
             exchange_fills_total {}
             exchange_rejects_total {}
             exchange_engine_in_queue_depth {}
+            exchange_journal_appends_total {}
+            exchange_journal_flushes_total {}
+            exchange_journal_errors_total {}
+            exchange_snapshots_total {}
+            exchange_journal_rotations_total {}
             ",
-            c, fi, fo, fills, rejects, depth
+            c, fi, fo, fills, rejects, depth,
+            journal_appends, journal_flushes, journal_errors, snapshots, rotations
         )
     }
 }

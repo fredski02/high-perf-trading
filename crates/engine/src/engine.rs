@@ -6,30 +6,103 @@ use tracing::{info, warn};
 use crate::order_book::{MatchFill, Order, OrderBook};
 use crate::{Inbound, Outbound};
 use admin_http::metrics::Metrics;
+use persistence::{Journal, JournalConfig, Snapshot};
 
 #[allow(unused_imports)]
 use common::Side;
 
 use common::{Ack, BookTop, Command, Event, Fill, NewOrder, Reject, RejectReason, TimeInForce};
+
+pub struct EngineConfig {
+    pub journal_path: String,
+    pub snapshot_dir: String,
+    pub journal_config: JournalConfig,
+    pub snapshot_interval: u64, // snapshot every N commands
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            journal_path: "journal.bin".to_string(),
+            snapshot_dir: "snapshots".to_string(),
+            journal_config: JournalConfig::default(),
+            snapshot_interval: 100_000,
+        }
+    }
+}
+
 pub struct Engine {
     rx: Receiver<Inbound>,
     tx: Sender<Outbound>,
     server_seq: u64,
+    command_seq: u64, // Track commands for snapshots
 
     // v1: single symbol
     book: OrderBook,
     metrics: Arc<Metrics>,
+    
+    // Persistence
+    journal: Journal,
+    config: EngineConfig,
 }
 
 impl Engine {
     pub fn new(rx: Receiver<Inbound>, tx: Sender<Outbound>, metrics: Arc<Metrics>) -> Self {
+        Self::new_with_config(rx, tx, metrics, EngineConfig::default())
+    }
+
+    pub fn new_with_config(
+        rx: Receiver<Inbound>,
+        tx: Sender<Outbound>,
+        metrics: Arc<Metrics>,
+        config: EngineConfig,
+    ) -> Self {
+        let journal = Journal::open_with_config(&config.journal_path, config.journal_config.clone())
+            .expect("failed to open journal");
+
         Self {
             rx,
             tx,
             server_seq: 1,
+            command_seq: 0,
             book: OrderBook::new(1),
             metrics,
+            journal,
+            config,
         }
+    }
+
+    /// Initialize engine from persistence (snapshot + journal replay)
+    pub fn restore_from_persistence(&mut self) -> anyhow::Result<()> {
+        // Try to load latest snapshot
+        if let Some(snapshot) = Snapshot::load_latest(&self.config.snapshot_dir)? {
+            info!("restoring from snapshot: seq={}", snapshot.sequence);
+            self.book.restore_from_snapshot(&snapshot.data)?;
+            self.command_seq = snapshot.sequence;
+            self.server_seq = snapshot.sequence + 1; // server_seq continues from snapshot
+        }
+
+        // Replay journal commands after snapshot
+        let all_cmds = self.journal.read_all()?;
+        let replay_start = self.command_seq as usize;
+        
+        if replay_start < all_cmds.len() {
+            let replay_cmds = &all_cmds[replay_start..];
+            info!("replaying {} commands from journal (after seq={})", replay_cmds.len(), self.command_seq);
+            
+            for cmd in replay_cmds {
+                self.replay_command(*cmd);
+            }
+        }
+
+        info!(
+            "engine restored: command_seq={}, server_seq={}, book orders={}",
+            self.command_seq,
+            self.server_seq,
+            self.book.live_order_count()
+        );
+
+        Ok(())
     }
 
     pub fn run(mut self) {
@@ -39,6 +112,12 @@ impl Engine {
             self.metrics.queue_dec();
             let conn_id = inb.conn_id;
 
+            // Journal the command BEFORE processing
+            if let Err(e) = self.journal.append(&inb.cmd) {
+                warn!("journal append failed: {:#}", e);
+                // In production, you might reject the order here
+            }
+
             let events = self.process(inb.cmd);
 
             for ev in events {
@@ -47,7 +126,45 @@ impl Engine {
                     return;
                 }
             }
+
+            self.command_seq += 1;
+
+            // Periodic snapshot
+            if self.config.snapshot_interval > 0
+                && self.command_seq % self.config.snapshot_interval == 0
+            {
+                if let Err(e) = self.take_snapshot() {
+                    warn!("snapshot failed: {:#}", e);
+                }
+            }
+
+            // Journal rotation check
+            if self.journal.should_rotate() {
+                if let Err(e) = self.journal.rotate() {
+                    warn!("journal rotation failed: {:#}", e);
+                }
+            }
         }
+
+        // Flush journal on shutdown
+        if let Err(e) = self.journal.flush() {
+            warn!("final journal flush failed: {:#}", e);
+        }
+    }
+
+    fn take_snapshot(&mut self) -> anyhow::Result<()> {
+        let data = self.book.serialize_snapshot()?;
+        let snapshot = Snapshot {
+            sequence: self.command_seq,
+            data,
+        };
+
+        snapshot.save(&self.config.snapshot_dir)?;
+
+        // Clean up old snapshots (keep last 3)
+        let _ = Snapshot::cleanup_old(&self.config.snapshot_dir, 3);
+
+        Ok(())
     }
 
     /// Process a command into 0..N events.
@@ -257,29 +374,29 @@ impl Engine {
         s
     }
 
+    /// Replay a single command (used during recovery)
+    fn replay_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::NewOrder(no) => {
+                let _ = self.handle_new(no);
+            }
+            Command::Cancel(c) => {
+                let _ = self.book.cancel(c.order_id, c.account_id);
+            }
+            Command::Replace(r) => {
+                let _ = self.process(Command::Replace(r));
+            }
+        }
+        self.command_seq += 1;
+    }
+
+    /// Legacy replay method for compatibility
     pub fn replay<I>(&mut self, cmds: I)
     where
         I: IntoIterator<Item = common::Command>,
     {
         for cmd in cmds {
-            match cmd {
-                common::Command::NewOrder(no) => {
-                    // Re-apply matching + book updates, but ignore emitted events.
-                    // This keeps book correct.
-                    let _ = self.handle_new(no);
-                }
-                common::Command::Cancel(c) => {
-                    let _ = self.book.cancel(c.order_id, c.account_id);
-                }
-                common::Command::Replace(r) => {
-                    // Use your real replace path (infer side), but ignore emitted events.
-                    let _ = self.process(common::Command::Replace(r));
-                }
-            }
+            self.replay_command(cmd);
         }
-
-        // After replay, reset server_seq if you persisted it elsewhere.
-        // For now, server_seq continues from 1, which is fine for a demo.
-        // Better: persist server_seq in a checkpoint/snapshot later.
     }
 }

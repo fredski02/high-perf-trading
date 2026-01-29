@@ -14,8 +14,9 @@ Workspace crates:
 
 - engine
   Single-threaded matching engine
-  Owns order book
+  Owns order book AND journal (no locking needed)
   Runs on dedicated OS thread (NOT tokio)
+  Handles snapshots and persistence
 
 - gateway
   Tokio TCP server
@@ -30,8 +31,10 @@ Workspace crates:
   /metrics (Prometheus text)
 
 - persistence
-  Append-only journal using postcard
-  Replays commands on startup to rebuild book
+  Append-only journal with CRC32 checksums
+  Snapshot support for fast recovery
+  Journal rotation to prevent unbounded growth
+  Configurable fsync batching
 
 ---
 
@@ -73,7 +76,7 @@ Codecs:
   - Binary (manual little-endian)
 
 Flow:
-  socket → decode → journal append → engine queue → match → events → router → socket
+  socket → decode → engine queue → journal append → match → events → router → socket
 
 ---
 
@@ -81,6 +84,7 @@ Flow:
 
 Prometheus-style:
 
+Core metrics:
 - exchange_connections
 - exchange_frames_in
 - exchange_frames_out
@@ -88,39 +92,82 @@ Prometheus-style:
 - exchange_rejects_total
 - exchange_engine_in_queue_depth
 
+Persistence metrics:
+- exchange_journal_appends_total
+- exchange_journal_flushes_total
+- exchange_journal_errors_total
+- exchange_snapshots_total
+- exchange_journal_rotations_total
+
 ---
 
-## Persistence
+## Persistence (✅ IMPLEMENTED)
 
-Journal:
-  [u32 len][postcard(Command)]
+### Architecture
+- Engine owns journal (single-threaded, no locks)
+- Commands journaled BEFORE processing (deterministic replay)
+- Periodic snapshots for fast recovery
+- CRC32 checksums for corruption detection
 
-Startup:
-  read journal → engine.replay(cmds) → run()
+### Journal Format
+Frame: [u32 len][postcard(Command)][u32 crc32]
+- Append-only with fsync batching
+- Configurable durability vs. latency tradeoff
+- Automatic rotation after N commands (default: 1M)
 
-Guarantee:
-  restart restores identical orderbook
+### Snapshot Format
+Frame: [u64 sequence][u32 len][serialized order book][u32 crc32]
+- Periodic snapshots (default: every 100k commands)
+- Automatic cleanup (keeps last 3)
+- Stores full order book state
 
-Snapshots not implemented yet.
+### Recovery Process
+1. Load latest snapshot (if exists)
+2. Restore order book from snapshot
+3. Replay journal commands after snapshot sequence
+4. Continue processing
+
+### Configuration (CLI args)
+```
+--journal-path <PATH>           (default: journal.bin)
+--snapshot-dir <DIR>            (default: snapshots)
+--journal-batch-size <N>        (default: 100)
+--snapshot-interval <N>         (default: 100000)
+```
+
+### Performance Tuning
+- Low latency: batch_size=10-50, frequent fsync
+- High throughput: batch_size=100-1000, less frequent fsync
+- Fast recovery: smaller snapshot_interval
+
+### Files Created
+- `journal.bin` - Current journal
+- `journal_<timestamp>.bin` - Rotated backups
+- `snapshots/snapshot_<sequence>.bin` - Snapshot files
 
 ---
 
 ## Testing
 
-bench crate:
+bench crate modes:
+- smoke-match - Order matching with fills
+- smoke-postonly - Post-only order rejection
+- smoke-ioc - IOC order behavior
+- smoke-replay - Verify persistence replay
+- bench-bin - Binary protocol RTT benchmark
 
-Modes:
-- smoke-match
-- smoke-postonly
-- smoke-ioc
-- smoke-replay
-- bench-bin
-
-justfile:
-- just dev
-- just smoke
-- just metrics
-- just replay-test
+justfile recipes:
+- just dev - Run gateway in dev mode
+- just dev-fast-snapshot - Dev with aggressive snapshotting
+- just dev-high-throughput - Dev with large batches
+- just smoke - Run all smoke tests
+- just test-persistence - Full persistence cycle test
+- just show-persistence - Show journal/snapshot files
+- just metrics - Show all metrics
+- just metrics-persistence - Show persistence metrics only
+- just replay-test - Test journal replay
+- just check - Run all quality checks (fmt, clippy, test)
+- just pre-commit - Quick check before git commit
 
 ---
 
@@ -131,6 +178,20 @@ justfile:
 - minimal allocations in hot path
 - simple correctness first
 - one symbol per process (for now)
+- production-ready durability
+
+---
+
+## Completed Features ✅
+
+- ✅ Append-only journal with postcard serialization
+- ✅ CRC32 checksums for data integrity
+- ✅ Configurable fsync batching (latency vs. durability)
+- ✅ Snapshot support for fast recovery
+- ✅ Journal rotation to prevent unbounded growth
+- ✅ Engine owns persistence (no gateway locking)
+- ✅ Full Prometheus metrics for monitoring
+- ✅ Deterministic replay guarantees
 
 ---
 
@@ -138,9 +199,9 @@ justfile:
 
 (EDIT THIS EACH SESSION)
 
-- snapshots for faster recovery
-- fsync batching
-- risk checks
+- risk checks (position limits, credit checks)
 - multi-symbol sharding
-- latency benchmarking
-
+- latency benchmarking (p50/p99/p999)
+- async fsync worker thread (optional optimization)
+- compression for snapshots (optional)
+- direct I/O for ultra-low latency (optional)
