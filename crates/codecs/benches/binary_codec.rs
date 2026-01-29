@@ -14,7 +14,7 @@ fn criterion_config() -> Criterion {
 }
 
 fn bench_decode_new_order(c: &mut Criterion) {
-    let codec = BinaryCodec::default();
+    let codec = BinaryCodec;
 
     let mut v = Vec::new();
     v.extend_from_slice(&1u16.to_le_bytes());
@@ -44,4 +44,3 @@ criterion_group! {
     targets = bench_decode_new_order
 }
 criterion_main!(benches);
-
