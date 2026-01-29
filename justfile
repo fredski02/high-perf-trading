@@ -19,6 +19,9 @@ fmt:
 bacon:
   bacon
 
+perf:
+  cargo bench 
+
 smoke:
   cargo run -p bench -- --mode smoke-all --bin-addr 127.0.0.1:9000 --json-addr 127.0.0.1:9001
 

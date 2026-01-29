@@ -1,15 +1,25 @@
 use std::sync::Arc;
+use std::{hint::black_box, time::Duration};
 
 use admin_http::metrics::Metrics;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 use common::{Command, NewOrder, OrderFlags, Side, TimeInForce};
 use engine::Engine;
 
+fn criterion_config() -> Criterion {
+    Criterion::default()
+        .sample_size(500)
+        .warm_up_time(Duration::from_secs(5))
+        .measurement_time(Duration::from_secs(20))
+        .confidence_level(0.99)
+        .nresamples(200_000)
+}
+
 fn bench_engine_process(c: &mut Criterion) {
     // Dummy channels (not used in process bench)
     let metrics = Arc::new(Metrics::default());
-    let (tx_in, rx_in) = crossbeam_channel::bounded(1);
+    let (_tx_in, rx_in) = crossbeam_channel::bounded(1);
     let (tx_out, _rx_out) = crossbeam_channel::bounded(1);
     let mut eng = Engine::new(rx_in, tx_out, metrics);
 
@@ -24,16 +34,18 @@ fn bench_engine_process(c: &mut Criterion) {
         tif: TimeInForce::Gtc,
         flags: OrderFlags { post_only: false },
     });
-
     c.bench_function("engine_process_ack", |b| {
-        b.iter(|| {
-            let ev = eng.process(black_box(cmd.clone()));
-            black_box(ev);
-        })
+        b.iter_batched(
+            || cmd.clone(),                                   // setup (not timed)
+            |cmd_i| black_box(eng.process(black_box(cmd_i))), // timed
+            BatchSize::SmallInput,
+        )
     });
-
-    drop(tx_in);
 }
 
-criterion_group!(benches, bench_engine_process);
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets = bench_engine_process
+}
 criterion_main!(benches);

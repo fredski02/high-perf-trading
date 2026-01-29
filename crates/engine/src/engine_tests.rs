@@ -9,7 +9,7 @@ mod tests {
     use common::{Command, NewOrder, OrderFlags, RejectReason, Side, TimeInForce};
 
     fn mk_engine() -> Engine {
-        let (in_tx, in_rx) = unbounded();
+        let (_, in_rx) = unbounded();
         let (out_tx, _out_rx) = unbounded();
         Engine::new(in_rx, out_tx, Arc::new(Metrics::default()))
     }

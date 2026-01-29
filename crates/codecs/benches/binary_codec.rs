@@ -1,34 +1,47 @@
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::{hint::black_box, time::Duration};
 
 use codecs::{BinaryCodec, Codec};
-use common::{Command, NewOrder, OrderFlags, Side, TimeInForce};
+
+fn criterion_config() -> Criterion {
+    Criterion::default()
+        .sample_size(200)
+        .warm_up_time(Duration::from_secs(5))
+        .measurement_time(Duration::from_secs(10))
+        .confidence_level(0.99)
+        .nresamples(200_000)
+}
 
 fn bench_decode_new_order(c: &mut Criterion) {
     let codec = BinaryCodec::default();
 
-    // Build a binary NewOrder payload: [u16 msg_type] + fields.
     let mut v = Vec::new();
-    v.extend_from_slice(&1u16.to_le_bytes()); // MT_NEW_ORDER
-    v.extend_from_slice(&1u64.to_le_bytes()); // client_seq
-    v.extend_from_slice(&123u64.to_le_bytes()); // order_id
-    v.extend_from_slice(&7u32.to_le_bytes()); // account_id
-    v.extend_from_slice(&1u32.to_le_bytes()); // symbol_id
-    v.push(0); // side buy
-    v.extend_from_slice(&100i64.to_le_bytes()); // price
-    v.extend_from_slice(&10i64.to_le_bytes()); // qty
-    v.push(0); // tif gtc
-    v.push(0); // post_only false
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&1u64.to_le_bytes());
+    v.extend_from_slice(&123u64.to_le_bytes());
+    v.extend_from_slice(&7u32.to_le_bytes());
+    v.extend_from_slice(&1u32.to_le_bytes());
+    v.push(0);
+    v.extend_from_slice(&100i64.to_le_bytes());
+    v.extend_from_slice(&10i64.to_le_bytes());
+    v.push(0);
+    v.push(0);
 
     let payload = Bytes::from(v);
 
     c.bench_function("binary_decode_new_order", |b| {
         b.iter(|| {
-            let cmd = codec.decode_command(&payload).unwrap();
+            let cmd = codec.decode_command(black_box(&payload)).unwrap();
             black_box(cmd);
         })
     });
 }
 
-criterion_group!(benches, bench_decode_new_order);
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets = bench_decode_new_order
+}
 criterion_main!(benches);
+

@@ -8,8 +8,10 @@ use tokio::{
     time::Instant,
 };
 
-use common::{Ack, BookTop, Command, Event, NewOrder, OrderFlags, RejectReason, Side, TimeInForce};
+#[allow(unused_imports)]
+use common::Side;
 
+use common::{Ack, Command, Event, NewOrder, OrderFlags, RejectReason, TimeInForce};
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(long, default_value = "smoke-all")]

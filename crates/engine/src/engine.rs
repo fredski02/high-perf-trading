@@ -6,9 +6,11 @@ use tracing::{info, warn};
 use crate::order_book::{MatchFill, Order, OrderBook};
 use crate::{Inbound, Outbound};
 use admin_http::metrics::Metrics;
-use common::{
-    Ack, BookTop, Command, Event, Fill, NewOrder, Reject, RejectReason, Side, TimeInForce,
-};
+
+#[allow(unused_imports)]
+use common::Side;
+
+use common::{Ack, BookTop, Command, Event, Fill, NewOrder, Reject, RejectReason, TimeInForce};
 pub struct Engine {
     rx: Receiver<Inbound>,
     tx: Sender<Outbound>,

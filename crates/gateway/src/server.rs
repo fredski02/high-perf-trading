@@ -17,7 +17,7 @@ use persistence::Journal;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::mpsc,
 };
 use tracing::{info, warn};
@@ -34,6 +34,7 @@ struct ConnEntry {
 struct Router {
     conns: Mutex<HashMap<u64, ConnEntry>>,
     out_rx: cb::Receiver<Outbound>,
+    #[allow(dead_code)]
     max_frame: usize,
     metrics: Arc<Metrics>,
 }
@@ -147,8 +148,8 @@ pub async fn run(args: crate::Args) -> anyhow::Result<()> {
     });
 
     // listeners need journal too
-    let bin_codec: Arc<dyn Codec> = Arc::new(BinaryCodec::default());
-    let json_codec: Arc<dyn Codec> = Arc::new(JsonCodec::default());
+    let bin_codec: Arc<dyn Codec> = Arc::new(BinaryCodec);
+    let json_codec: Arc<dyn Codec> = Arc::new(JsonCodec);
 
     tokio::spawn(run_listener(
         args.binary_addr.clone(),
@@ -197,7 +198,7 @@ async fn run_listener(
         router.register(conn_id, wtx, codec.clone());
 
         // split stream into owned read/write halves
-        let (mut rd, mut wr) = socket.into_split();
+        let (rd, mut wr) = socket.into_split();
 
         let router_w = router.clone();
         tokio::spawn(async move {
@@ -233,6 +234,8 @@ async fn run_listener(
         });
     }
 }
+
+#[allow(clippy::too_many_arguments)]
 async fn read_loop(
     mut rd: OwnedReadHalf,
     conn_id: u64,
@@ -255,41 +258,30 @@ async fn read_loop(
             break;
         }
         buf.extend_from_slice(&temp[..n]);
+        while let Some(payload) = try_read_frame(&mut buf, max_frame)? {
+            metrics.inc_frames_in();
 
-        loop {
-            match try_read_frame(&mut buf, max_frame)? {
-                Some(payload) => {
-                    metrics.inc_frames_in();
-                    let cmd = match codec.decode_command(&payload) {
-                        Ok(c) => c,
-                        Err(_) => continue,
-                    };
-                    match engine_in.try_send(Inbound {
-                        conn_id,
-                        cmd: cmd.clone(),
-                    }) {
-                        Ok(()) => {
-                            metrics.queue_inc();
+            let cmd = match codec.decode_command(&payload) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
 
-                            // ✅ journal only commands that made it into the engine queue
-                            if let Ok(mut j) = journal.lock() {
-                                if let Err(e) = j.append(&cmd) {
-                                    warn!("journal append failed: {e:#}");
-                                    // For now we keep going. If you want strict durability, reject instead.
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            let client_seq = match &cmd {
-                                common::Command::NewOrder(x) => x.client_seq,
-                                common::Command::Cancel(x) => x.client_seq,
-                                common::Command::Replace(x) => x.client_seq,
-                            };
-                            router.send_reject_overloaded(conn_id, client_seq);
-                        }
+            if engine_in.try_send(Inbound { conn_id, cmd }).is_ok() {
+                metrics.queue_inc();
+
+                // ✅ journal only commands that made it into the engine queue
+                if let Ok(mut j) = journal.lock() {
+                    if let Err(e) = j.append(&cmd) {
+                        warn!("journal append failed: {e:#}");
                     }
                 }
-                None => break,
+            } else {
+                let client_seq = match &cmd {
+                    common::Command::NewOrder(x) => x.client_seq,
+                    common::Command::Cancel(x) => x.client_seq,
+                    common::Command::Replace(x) => x.client_seq,
+                };
+                router.send_reject_overloaded(conn_id, client_seq);
             }
         }
     }
