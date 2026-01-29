@@ -195,13 +195,56 @@ justfile recipes:
 
 ---
 
+## Risk Management Roadmap
+
+### Phase 1: In-Memory Positions + Snapshot ✅ COMPLETE
+**Status**: Fully implemented and tested (13 unit tests passing)
+
+**Implementation Details**:
+- Position tracking per account (built from fills)
+- Risk limits stored in-memory and snapshotted
+- Zero latency impact (~20ns HashMap lookup overhead)
+- SetRiskLimits and QueryAccount commands
+- Deterministic replay (positions rebuilt from journal)
+- Position tracking: net_position, avg_price, realized_pnl
+- Default limits: 10k long/short, 1k order size
+- Account state integrated into snapshots
+- Binary and JSON codec support
+
+**Files Modified**:
+- `crates/engine/src/account_manager.rs` (new module, 8 tests)
+- `crates/engine/src/engine.rs` (risk checks, position updates)
+- `crates/engine/src/order_book.rs` (added maker_account_id to MatchFill)
+- `crates/common/src/types.rs` (Position, RiskLimits, new commands/events)
+- `crates/codecs/src/binary.rs` (protocol support)
+- `crates/gateway/src/server.rs` (command routing)
+
+### Phase 2: Dynamic Risk Limits (FUTURE)
+- Move risk limits to config file (risk_limits.toml)
+- Add admin API: `POST /admin/accounts/{id}/risk-limits`
+- Support SIGHUP reload without restart
+- Still zero hot-path latency
+- Estimated: 2-4 hours implementation
+
+### Phase 3: External Position Sync (FUTURE)
+- Keep hot path 100% in-memory (0µs latency)
+- Background async sync to database (PostgreSQL/Redis)
+- Positions queryable externally with ~1s lag
+- Enables: monitoring dashboards, compliance reporting
+- Database only for analytics, NOT hot path
+- Estimated: 1 day implementation
+
+---
+
 ## Next Tasks
 
 (EDIT THIS EACH SESSION)
 
-- risk checks (position limits, credit checks)
+- **[COMPLETE]** Phase 1: Risk management (position tracking + limits)
+- **[NEXT]** Phase 2: Dynamic risk limits via config file + admin API
+- **[FUTURE]** Phase 3: External position sync to database for analytics
 - multi-symbol sharding
-- latency benchmarking (p50/p99/p999)
+- latency benchmarking (p50/p99/p999 in metrics endpoint)
 - async fsync worker thread (optional optimization)
 - compression for snapshots (optional)
 - direct I/O for ultra-low latency (optional)

@@ -3,15 +3,16 @@ use std::sync::Arc;
 use crossbeam_channel::{Receiver, Sender};
 use tracing::{info, warn};
 
+use crate::account_manager::AccountManager;
 use crate::order_book::{MatchFill, Order, OrderBook};
 use crate::{Inbound, Outbound};
 use admin_http::metrics::Metrics;
 use persistence::{Journal, JournalConfig, Snapshot};
 
-#[allow(unused_imports)]
-use common::Side;
-
-use common::{Ack, BookTop, Command, Event, Fill, NewOrder, Reject, RejectReason, TimeInForce};
+use common::{
+    Ack, AccountState, BookTop, Command, Event, Fill, NewOrder, QueryAccount, Reject,
+    RejectReason, RiskLimits, SetRiskLimits, TimeInForce,
+};
 
 pub struct EngineConfig {
     pub journal_path: String,
@@ -44,6 +45,9 @@ pub struct Engine {
     // Persistence
     journal: Journal,
     config: EngineConfig,
+
+    // Risk management
+    account_manager: AccountManager,
 }
 
 impl Engine {
@@ -69,6 +73,7 @@ impl Engine {
             metrics,
             journal,
             config,
+            account_manager: AccountManager::new(RiskLimits::default()),
         }
     }
 
@@ -77,7 +82,19 @@ impl Engine {
         // Try to load latest snapshot
         if let Some(snapshot) = Snapshot::load_latest(&self.config.snapshot_dir)? {
             info!("restoring from snapshot: seq={}", snapshot.sequence);
-            self.book.restore_from_snapshot(&snapshot.data)?;
+            
+            // Deserialize combined snapshot
+            #[derive(serde::Serialize, serde::Deserialize)]
+            struct EngineSnapshot {
+                book: Vec<u8>,
+                accounts: Vec<u8>,
+            }
+            
+            let combined: EngineSnapshot = postcard::from_bytes(&snapshot.data)?;
+            
+            self.book.restore_from_snapshot(&combined.book)?;
+            self.account_manager = postcard::from_bytes(&combined.accounts)?;
+            
             self.command_seq = snapshot.sequence;
             self.server_seq = snapshot.sequence + 1; // server_seq continues from snapshot
         }
@@ -153,7 +170,24 @@ impl Engine {
     }
 
     fn take_snapshot(&mut self) -> anyhow::Result<()> {
-        let data = self.book.serialize_snapshot()?;
+        // Serialize both book and account manager state
+        let book_data = self.book.serialize_snapshot()?;
+        let account_data = postcard::to_stdvec(&self.account_manager)?;
+        
+        // Combine both into a single snapshot structure
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct EngineSnapshot {
+            book: Vec<u8>,
+            accounts: Vec<u8>,
+        }
+        
+        let combined = EngineSnapshot {
+            book: book_data,
+            accounts: account_data,
+        };
+        
+        let data = postcard::to_stdvec(&combined)?;
+        
         let snapshot = Snapshot {
             sequence: self.command_seq,
             data,
@@ -171,6 +205,10 @@ impl Engine {
     pub fn process(&mut self, cmd: Command) -> Vec<Event> {
         match cmd {
             Command::NewOrder(no) => self.handle_new(no),
+            
+            Command::SetRiskLimits(srl) => self.handle_set_risk_limits(srl),
+            
+            Command::QueryAccount(qa) => self.handle_query_account(qa),
 
             Command::Cancel(c) => {
                 let mut evs = Vec::new();
@@ -244,6 +282,12 @@ impl Engine {
             return evs;
         }
 
+        // Risk check
+        if let Err(reason) = self.account_manager.check_risk(no.account_id, no.side, no.qty) {
+            evs.push(self.reject(no.client_seq, Some(no.order_id), reason));
+            return evs;
+        }
+
         // Post-only check
         if no.flags.post_only && self.book.would_cross(no.side, no.price) {
             evs.push(self.reject(
@@ -260,9 +304,16 @@ impl Engine {
                 self.book
                     .match_taker(no.order_id, no.side, no.price, no.qty);
 
-            // Emit fills
+            // Emit fills and update positions
             for f in fills.iter() {
                 self.metrics.inc_fills();
+                
+                // Update positions for taker (incoming order)
+                self.account_manager.apply_fill(no.account_id, no.side, f.price, f.qty);
+                
+                // Update positions for maker (resting order) - opposite side
+                self.account_manager.apply_fill(f.maker_account_id, no.side.opposite(), f.price, f.qty);
+                
                 evs.push(Event::Fill(Fill {
                     server_seq: self.next_seq(),
                     client_seq: no.client_seq,
@@ -311,6 +362,25 @@ impl Engine {
         evs.push(self.book_top_event());
         evs.push(self.ack(no.client_seq, no.order_id));
         evs
+    }
+
+    fn handle_set_risk_limits(&mut self, srl: SetRiskLimits) -> Vec<Event> {
+        self.account_manager.set_limits(srl.account_id, srl.limits);
+        vec![self.ack(srl.client_seq, 0)]
+    }
+
+    fn handle_query_account(&mut self, qa: QueryAccount) -> Vec<Event> {
+        let position = self.account_manager.get_position(qa.account_id);
+        let risk_limits = self.account_manager.get_limits(qa.account_id);
+        
+        vec![Event::AccountState(AccountState {
+            server_seq: self.next_seq(),
+            client_seq: qa.client_seq,
+            account_id: qa.account_id,
+            symbol_id: qa.symbol_id,
+            position,
+            risk_limits,
+        })]
     }
 
     fn ack(&mut self, client_seq: u64, order_id: u64) -> Event {
@@ -385,6 +455,12 @@ impl Engine {
             }
             Command::Replace(r) => {
                 let _ = self.process(Command::Replace(r));
+            }
+            Command::SetRiskLimits(srl) => {
+                let _ = self.handle_set_risk_limits(srl);
+            }
+            Command::QueryAccount(qa) => {
+                let _ = self.handle_query_account(qa);
             }
         }
         self.command_seq += 1;

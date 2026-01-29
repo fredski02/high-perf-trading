@@ -6,11 +6,14 @@ use crate::codec::Codec;
 const MT_NEW_ORDER: u16 = 1;
 const MT_CANCEL: u16 = 2;
 const MT_REPLACE: u16 = 3;
+const MT_SET_RISK_LIMITS: u16 = 4;
+const MT_QUERY_ACCOUNT: u16 = 5;
 
 const MT_ACK: u16 = 101;
 const MT_REJECT: u16 = 102;
 const MT_FILL: u16 = 103;
 const MT_BOOK_TOP: u16 = 104;
+const MT_ACCOUNT_STATE: u16 = 105;
 
 #[derive(Clone, Default)]
 pub struct BinaryCodec;
@@ -67,6 +70,21 @@ impl Codec for BinaryCodec {
                 put_opt_i64(out, b.best_bid_qty);
                 put_opt_i64(out, b.best_ask_px);
                 put_opt_i64(out, b.best_ask_qty);
+            }
+            Event::AccountState(a) => {
+                out.put_u16_le(MT_ACCOUNT_STATE);
+                out.put_u64_le(a.server_seq);
+                out.put_u64_le(a.client_seq);
+                out.put_u32_le(a.account_id);
+                out.put_u32_le(a.symbol_id);
+                // Position
+                out.put_i64_le(a.position.net_position);
+                out.put_i64_le(a.position.avg_price);
+                out.put_i64_le(a.position.realized_pnl);
+                // RiskLimits
+                out.put_i64_le(a.risk_limits.max_long_position);
+                out.put_i64_le(a.risk_limits.max_short_position);
+                out.put_i64_le(a.risk_limits.max_order_size);
             }
         }
         Ok(())
@@ -140,6 +158,34 @@ impl Codec for BinaryCodec {
                     symbol_id,
                     new_price,
                     new_qty,
+                }))
+            }
+            MT_SET_RISK_LIMITS => {
+                let client_seq = get_u64(&mut b)?;
+                let account_id = get_u32(&mut b)?;
+                let symbol_id = get_u32(&mut b)?;
+                let max_long_position = get_i64(&mut b)?;
+                let max_short_position = get_i64(&mut b)?;
+                let max_order_size = get_i64(&mut b)?;
+                Ok(Command::SetRiskLimits(common::SetRiskLimits {
+                    client_seq,
+                    account_id,
+                    symbol_id,
+                    limits: common::RiskLimits {
+                        max_long_position,
+                        max_short_position,
+                        max_order_size,
+                    },
+                }))
+            }
+            MT_QUERY_ACCOUNT => {
+                let client_seq = get_u64(&mut b)?;
+                let account_id = get_u32(&mut b)?;
+                let symbol_id = get_u32(&mut b)?;
+                Ok(Command::QueryAccount(common::QueryAccount {
+                    client_seq,
+                    account_id,
+                    symbol_id,
                 }))
             }
             _ => Err(ProtoError::Malformed("binary: unknown msg_type")),

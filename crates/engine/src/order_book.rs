@@ -50,6 +50,7 @@ pub struct OrderBook {
 #[derive(Debug, Clone, Copy)]
 pub struct MatchFill {
     pub maker_order_id: OrderId,
+    pub maker_account_id: AccountId,
     pub taker_order_id: OrderId,
     pub price: Price,
     pub qty: Qty,
@@ -201,12 +202,14 @@ impl OrderBook {
                             None => true, // level empty
                             Some(maker_key) => {
                                 let maker_order_id;
+                                let maker_account_id;
                                 let trade_qty;
 
                                 {
                                     let maker =
                                         self.orders.get_mut(maker_key).expect("maker exists");
                                     maker_order_id = maker.order_id;
+                                    maker_account_id = maker.account_id;
                                     trade_qty = taker_qty.min(maker.qty_rem);
                                     maker.qty_rem -= trade_qty;
                                 }
@@ -216,6 +219,7 @@ impl OrderBook {
 
                                 fills.push(MatchFill {
                                     maker_order_id,
+                                    maker_account_id,
                                     taker_order_id,
                                     price: best_ask_px,
                                     qty: trade_qty,
@@ -264,12 +268,14 @@ impl OrderBook {
                             None => true,
                             Some(maker_key) => {
                                 let maker_order_id;
+                                let maker_account_id;
                                 let trade_qty;
 
                                 {
                                     let maker =
                                         self.orders.get_mut(maker_key).expect("maker exists");
                                     maker_order_id = maker.order_id;
+                                    maker_account_id = maker.account_id;
                                     trade_qty = taker_qty.min(maker.qty_rem);
                                     maker.qty_rem -= trade_qty;
                                 }
@@ -279,6 +285,7 @@ impl OrderBook {
 
                                 fills.push(MatchFill {
                                     maker_order_id,
+                                    maker_account_id,
                                     taker_order_id,
                                     price: best_bid_px,
                                     qty: trade_qty,

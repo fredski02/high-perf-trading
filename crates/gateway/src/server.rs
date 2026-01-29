@@ -282,6 +282,8 @@ async fn read_loop(
                     common::Command::NewOrder(x) => x.client_seq,
                     common::Command::Cancel(x) => x.client_seq,
                     common::Command::Replace(x) => x.client_seq,
+                    common::Command::SetRiskLimits(x) => x.client_seq,
+                    common::Command::QueryAccount(x) => x.client_seq,
                 };
                 router.send_reject_overloaded(conn_id, client_seq);
             }
