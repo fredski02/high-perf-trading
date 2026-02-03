@@ -9,18 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "admin_http"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -451,7 +439,6 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "engine"
 version = "0.1.0"
 dependencies = [
- "admin_http",
  "anyhow",
  "common",
  "criterion",
@@ -535,24 +522,6 @@ dependencies = [
  "futures-task",
  "pin-project-lite",
  "pin-utils",
-]
-
-[[package]]
-name = "gateway"
-version = "0.1.0"
-dependencies = [
- "admin_http",
- "anyhow",
- "bytes",
- "clap",
- "codecs",
- "common",
- "crossbeam-channel",
- "engine",
- "persistence",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1140,6 +1109,24 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "clap",
+ "codecs",
+ "common",
+ "crossbeam-channel",
+ "engine",
+ "persistence",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use admin_http::metrics::Metrics;
+use common::Metrics;
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use codecs::{BinaryCodec, Codec, JsonCodec};
@@ -108,15 +108,15 @@ impl Clone for ConnEntry {
     }
 }
 
-pub async fn run(args: crate::Args) -> anyhow::Result<()> {
+pub async fn run(args: crate::config::Args) -> anyhow::Result<()> {
     let metrics = Arc::new(Metrics::default());
 
-    // spawn admin_http in-process
+    // spawn admin server in-process
     let admin_addr = args.admin_addr.clone();
     let metrics_admin = metrics.clone();
     tokio::spawn(async move {
-        if let Err(e) = admin_http::server::run(admin_addr, metrics_admin).await {
-            tracing::warn!("admin_http failed: {e:#}");
+        if let Err(e) = crate::admin_server::run(admin_addr, metrics_admin).await {
+            tracing::warn!("admin server failed: {e:#}");
         }
     });
 

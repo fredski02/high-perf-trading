@@ -1,5 +1,8 @@
 pub mod types;
+pub mod metrics;
+
 pub use types::*;
+pub use metrics::Metrics;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtoError {

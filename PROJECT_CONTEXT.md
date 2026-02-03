@@ -18,17 +18,15 @@ Workspace crates:
   Runs on dedicated OS thread (NOT tokio)
   Handles snapshots and persistence
 
-- gateway
-  Tokio TCP server
-  - binary port (fast path)
-  - JSON port (debug path)
+- server
+  Combined TCP + HTTP server
+  - Binary protocol port (9000) - fast path
+  - JSON protocol port (9001) - debug path  
+  - Admin HTTP port (8080) - health + metrics
   Routes inbound commands → engine via bounded channel
   Routes outbound events → clients via router
-
-- admin_http
-  Axum server (in-process)
-  /health
-  /metrics (Prometheus text)
+  Metrics: Prometheus text format at /metrics
+  Includes admin HTTP server (Axum) for /health and /metrics endpoints
 
 - persistence
   Append-only journal with CRC32 checksums
@@ -157,7 +155,7 @@ bench crate modes:
 - bench-bin - Binary protocol RTT benchmark
 
 justfile recipes:
-- just dev - Run gateway in dev mode
+- just dev - Run server in dev mode
 - just dev-fast-snapshot - Dev with aggressive snapshotting
 - just dev-high-throughput - Dev with large batches
 - just smoke - Run all smoke tests
@@ -217,7 +215,7 @@ justfile recipes:
 - `crates/engine/src/order_book.rs` (added maker_account_id to MatchFill)
 - `crates/common/src/types.rs` (Position, RiskLimits, new commands/events)
 - `crates/codecs/src/binary.rs` (protocol support)
-- `crates/gateway/src/server.rs` (command routing)
+- `crates/server/src/gateway.rs` (command routing)
 
 ### Phase 2: Dynamic Risk Limits (FUTURE)
 - Move risk limits to config file (risk_limits.toml)

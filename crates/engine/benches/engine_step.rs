@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::{hint::black_box, time::Duration};
 
-use admin_http::metrics::Metrics;
+use common::Metrics;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 use common::{Command, NewOrder, OrderFlags, Side, TimeInForce};

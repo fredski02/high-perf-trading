@@ -1,14 +1,17 @@
 [package]
-name = "gateway"
+name = "server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
 
 [dependencies]
 common = { path = "../common" }
 engine = { path = "../engine" }
 codecs = { path = "../codecs" }
-admin_http = { path = "../admin_http"}
 persistence = { path = "../persistence" }
 tokio.workspace = true
 bytes.workspace = true
@@ -17,4 +20,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 anyhow.workspace = true
-
+axum.workspace = true

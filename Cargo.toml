@@ -5,8 +5,7 @@ members = [
   "crates/engine",
   "crates/codecs",
   "crates/persistence",
-  "crates/gateway",
-  "crates/admin_http",
+  "crates/server",
   "crates/bench",
 ]
 
@@ -42,4 +41,3 @@ once_cell = "1"
 
 # benches
 criterion = "0.8.1"
-

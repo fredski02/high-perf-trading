@@ -6,7 +6,7 @@ use tracing::{info, warn};
 use crate::account_manager::AccountManager;
 use crate::order_book::{MatchFill, Order, OrderBook};
 use crate::{Inbound, Outbound};
-use admin_http::metrics::Metrics;
+use common::Metrics;
 use persistence::{Journal, JournalConfig, Snapshot};
 
 use common::{

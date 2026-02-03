@@ -8,7 +8,7 @@ default:
 
 # Run gateway in dev mode with logging
 dev:
-  RUST_LOG=info cargo run -p gateway -- \
+  RUST_LOG=info cargo run -p server -- \
     --binary-addr 127.0.0.1:9000 \
     --json-addr 127.0.0.1:9001 \
     --admin-addr 127.0.0.1:8080 \
@@ -19,7 +19,7 @@ dev:
 
 # Run gateway with aggressive persistence for testing
 dev-fast-snapshot:
-  RUST_LOG=info cargo run -p gateway -- \
+  RUST_LOG=info cargo run -p server -- \
     --binary-addr 127.0.0.1:9000 \
     --json-addr 127.0.0.1:9001 \
     --admin-addr 127.0.0.1:8080 \
@@ -30,7 +30,7 @@ dev-fast-snapshot:
 
 # Run gateway with high-throughput settings (larger batches)
 dev-high-throughput:
-  RUST_LOG=info cargo run -p gateway -- \
+  RUST_LOG=info cargo run -p server -- \
     --binary-addr 127.0.0.1:9000 \
     --json-addr 127.0.0.1:9001 \
     --admin-addr 127.0.0.1:8080 \
@@ -45,7 +45,7 @@ build:
 
 # Build and prepare for RTT benchmarking
 build-rtt:
-  cargo build --release --bin gateway --bin bench
+  cargo build --release --bin server --bin bench
   @echo ""
   @echo "Ready for RTT benchmarking:"
   @echo "  Terminal 1: just dev"
@@ -92,7 +92,7 @@ replay-test:
   @echo "==> Step 1: Populate journal with orders"
   cargo run -p bench -- --mode smoke-all --json-addr 127.0.0.1:9001
   @echo ""
-  @echo "==> Step 2: Restart gateway manually (Ctrl+C in the dev terminal, then run 'just dev')"
+  @echo "==> Step 2: Restart server manually (Ctrl+C in the dev terminal, then run 'just dev')"
   @echo "==> Step 3: After restart, verify replay with:"
   @echo "    just replay-verify"
 
@@ -123,14 +123,14 @@ test-persistence:
   @echo "  Persistence Test"
   @echo "=========================================="
   @echo ""
-  @echo "==> Step 1: Cleaning and starting fresh gateway"
+  @echo "==> Step 1: Cleaning and starting fresh server"
   @just kill || true
   @just clean-persistence
   @echo ""
-  @echo "==> Step 2: Starting gateway in background with fast snapshots"
-  @cargo run --release -p gateway -- \
+  @echo "==> Step 2: Starting server in background with fast snapshots"
+  @cargo run --release -p server -- \
     --journal-batch-size 5 \
-    --snapshot-interval 10 > /tmp/gateway-persist.log 2>&1 &
+    --snapshot-interval 10 > /tmp/server-persist.log 2>&1 &
   @echo "Waiting for gateway to start..."
   @sleep 2
   @echo ""
@@ -143,10 +143,10 @@ test-persistence:
   @echo "==> Step 4: Checking created files"
   @just show-persistence
   @echo ""
-  @echo "==> Step 5: Checking gateway logs for snapshots"
-  @grep -i snapshot /tmp/gateway-persist.log || echo "No snapshots yet (need more commands)"
+  @echo "==> Step 5: Checking server logs for snapshots"
+  @grep -i snapshot /tmp/server-persist.log || echo "No snapshots yet (need more commands)"
   @echo ""
-  @echo "==> Step 6: Killing gateway"
+  @echo "==> Step 6: Killing server"
   @just kill
   @echo ""
   @echo "=========================================="
@@ -169,12 +169,12 @@ demo-persistence:
   @echo "  2. Start gateway with fast snapshots"
   @echo "  3. Send some orders"
   @echo "  4. Show persistence files"
-  @echo "  5. Restart gateway and verify replay"
+  @echo "  5. Restart server and verify replay"
   @echo ""
   @read -p "Press Enter to start demo..." && \
   just clean-persistence && \
   echo "" && \
-  echo "==> Starting gateway (Ctrl+C to stop after seeing snapshots)..." && \
+  echo "==> Starting server (Ctrl+C to stop after seeing snapshots)..." && \
   echo "==> Run this in another terminal: just smoke" && \
   just dev-fast-snapshot
 
@@ -248,7 +248,7 @@ bench-rtt iters="10000":
 
 # Profile with perf (Linux only)
 profile:
-  cargo build --release --bin gateway
+  cargo build --release --bin server
   perf record -F 99 -g -- ./target/release/gateway
   perf script | inferno-collapse-perf | inferno-flamegraph > flamegraph.svg
   @echo "Flamegraph saved to flamegraph.svg"
@@ -265,7 +265,7 @@ clean-all: clean clean-persistence
 
 # Kill any running gateway/bench processes
 kill:
-  @echo "Killing gateway and bench processes..."
+  @echo "Killing server and bench processes..."
   @pkill -9 gateway 2>/dev/null && echo "✓ Killed gateway" || echo "No gateway running"
   @pkill -9 bench 2>/dev/null && echo "✓ Killed bench" || echo "No bench running"
 

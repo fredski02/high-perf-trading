@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 common = { path = "../common" }
-admin_http = { path = "../admin_http"}
 persistence = { path = "../persistence" }
 crossbeam-channel.workspace = true
 tracing.workspace = true

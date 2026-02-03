@@ -5,7 +5,7 @@ mod tests {
     use crossbeam_channel::unbounded;
 
     use crate::engine::Engine;
-    use admin_http::metrics::Metrics;
+    use common::Metrics;
     use common::{Command, NewOrder, OrderFlags, RejectReason, Side, TimeInForce};
 
     fn mk_engine() -> Engine {

@@ -8,7 +8,7 @@ use axum::{
     Router,
 };
 
-use crate::metrics::Metrics;
+use common::Metrics;
 
 #[derive(Clone)]
 struct AppState {

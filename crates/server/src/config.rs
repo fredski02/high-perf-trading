@@ -1,7 +1,4 @@
-mod server;
-
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -34,14 +31,4 @@ pub struct Args {
     /// engine ingress queue capacity
     #[arg(long, default_value_t = 100_000)]
     pub ingress_cap: usize,
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
-
-    let args = Args::parse();
-    server::run(args).await
 }
