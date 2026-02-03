@@ -27,6 +27,16 @@ Workspace crates:
   Routes outbound events → clients via router
   Metrics: Prometheus text format at /metrics
   Includes admin HTTP server (Axum) for /health and /metrics endpoints
+  
+  **Thread & Task Architecture:**
+  - Main Tokio runtime handles all async I/O (TCP listeners, connections, HTTP)
+  - Engine runs on dedicated OS thread for zero-latency matching
+  - Router runs in spawn_blocking to bridge crossbeam channels with Tokio
+  - One Tokio task per client connection (read + write loops)
+  - Crossbeam bounded channel (100k) for commands (backpressure protection)
+  - Crossbeam unbounded channel for events (engine never blocks)
+  
+  See detailed thread topology diagram below.
 
 - persistence
   Append-only journal with CRC32 checksums
@@ -45,6 +55,131 @@ Workspace crates:
   - BTreeMap<Price, Level>
   - Slab<Order>
   - VecDeque for FIFO queues
+
+---
+
+## Thread & Task Topology
+
+### ASCII Diagram
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    MAIN TOKIO RUNTIME                    │
+│                                                           │
+│  ┌─────────────┐  ┌──────────────┐  ┌─────────────┐    │
+│  │ Admin HTTP  │  │ Binary Proto │  │ JSON Proto  │    │
+│  │   :8080     │  │    :9000     │  │    :9001    │    │
+│  │  (Axum)     │  │   Listener   │  │   Listener  │    │
+│  └─────────────┘  └──────────────┘  └─────────────┘    │
+│         │                │                  │            │
+│         │                └──────┬───────────┘            │
+│         │                       ▼                        │
+│         │         ┌──────────────────────────┐          │
+│         │         │  Connection Tasks        │          │
+│         │         │  (one per client)        │          │
+│         │         │  • Read Loop (async)     │          │
+│         │         │  • Write Loop (async)    │          │
+│         │         └──────────────────────────┘          │
+│         │                       │                        │
+│         │                       │ Commands               │
+│         │                       ▼                        │
+│         │            ┌────────────────────┐             │
+│         │            │ Crossbeam Channel  │             │
+│         │            │   (bounded 100k)   │             │
+│         │            └────────────────────┘             │
+│         │                       │                        │
+└─────────┼───────────────────────┼────────────────────────┘
+          │                       │
+          │         ┌─────────────▼─────────────┐
+          │         │   DEDICATED OS THREAD     │
+          │         │                           │
+          │         │  ┌─────────────────────┐ │
+          │         │  │   Engine            │ │
+          │         │  │   • Order Book      │ │
+          │         │  │   • Journal         │ │
+          │         │  │   • Snapshots       │ │
+          │         │  │   • Risk Mgmt       │ │
+          │         │  └─────────────────────┘ │
+          │         │            │              │
+          │         └────────────┼──────────────┘
+          │                      │ Events
+          │                      ▼
+          │         ┌────────────────────────┐
+          │         │   Crossbeam Channel    │
+          │         │     (unbounded)        │
+          │         └────────────────────────┘
+          │                      │
+          │         ┌────────────▼──────────┐
+          │         │ Router Task           │
+          │         │ (spawn_blocking)      │
+          │         │ • Reads events        │
+          │         │ • Finds conn          │
+          │         │ • Encodes + sends     │
+          │         └───────────────────────┘
+          │                      │
+          └──────────────────────┘
+                     Frames to clients
+```
+
+### Mermaid Diagram
+
+```mermaid
+graph LR
+    Client[Client]
+    
+    subgraph Tokio["Tokio Runtime - Async I/O"]
+        Admin["Admin HTTP<br/>:8080"]
+        BinListen["Binary Listener<br/>:9000"]
+        JsonListen["JSON Listener<br/>:9001"]
+        
+        ReadLoop["Read Loop<br/>Decode frames"]
+        WriteLoop["Write Loop<br/>Send frames"]
+    end
+    
+    InQueue["📬 Crossbeam<br/>BOUNDED 100k<br/>Commands"]
+    
+    subgraph OsThread["Dedicated OS Thread"]
+        Engine["⚡ Engine<br/>Order Book<br/>Journal<br/>Snapshots<br/>Risk"]
+    end
+    
+    OutQueue["📬 Crossbeam<br/>UNBOUNDED<br/>Events"]
+    
+    subgraph Blocking["spawn_blocking"]
+        Router["Router<br/>Match conn_id<br/>Encode events"]
+    end
+    
+    Client -->|TCP| BinListen
+    Client -->|TCP| JsonListen
+    BinListen --> ReadLoop
+    JsonListen --> ReadLoop
+    
+    ReadLoop -->|Commands| InQueue
+    InQueue -->|Inbound| Engine
+    Engine -->|Events| OutQueue
+    OutQueue -->|Outbound| Router
+    Router -->|Frames| WriteLoop
+    WriteLoop -->|TCP| Client
+    
+    style Engine fill:#ffcccc,stroke:#ff0000,stroke-width:3px
+    style Router fill:#ccffcc,stroke:#00aa00,stroke-width:2px
+    style Tokio fill:#cce5ff,stroke:#0066cc,stroke-width:2px
+    style OsThread fill:#ffdddd,stroke:#ff0000,stroke-width:3px
+    style Blocking fill:#ddffdd,stroke:#00aa00,stroke-width:2px
+    style InQueue fill:#ffffcc,stroke:#cccc00,stroke-width:2px
+    style OutQueue fill:#ffffcc,stroke:#cccc00,stroke-width:2px
+```
+
+### Key Design Points
+
+1. **Engine Thread** - Dedicated OS thread, single-threaded for determinism, zero locks
+2. **Tokio Runtime** - Handles all async I/O (thousands of connections efficiently)
+3. **Router Bridge** - spawn_blocking bridges crossbeam (blocking) ↔ Tokio (async)
+4. **Bounded Inbound** - Backpressure protection (reject when queue full)
+5. **Unbounded Outbound** - Engine never blocks (router consumes fast enough)
+6. **Connection Tasks** - One per client, split read/write for clarity
+7. **Crossbeam Channels** - Zero-allocation, lock-free, fast
+
+**Latency**: ~13µs p50 (engine hot path has zero async overhead)
 
 ---
 

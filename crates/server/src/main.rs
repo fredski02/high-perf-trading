@@ -1,6 +1,9 @@
 mod admin_server;
 mod config;
+mod connection;
 mod gateway;
+mod protocol;
+mod router;
 
 use clap::Parser;
 use config::Args;
