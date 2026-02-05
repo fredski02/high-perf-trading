@@ -10,8 +10,6 @@ use crossbeam_channel as cb;
 use engine::Outbound;
 use tokio::sync::mpsc;
 
-use crate::protocol::frame_payload;
-
 pub type ConnTx = mpsc::Sender<Bytes>;
 
 #[derive(Clone)]
@@ -60,8 +58,8 @@ impl Router {
                     if codec.encode_event(&out.ev, &mut payload).is_err() {
                         continue;
                     }
-                    let framed = frame_payload(payload.freeze());
-                    if tx.try_send(framed).is_ok() {
+                    // LengthDelimitedCodec handles framing automatically
+                    if tx.try_send(payload.freeze()).is_ok() {
                         this.metrics.inc_frames_out();
                     }
                 }
@@ -83,8 +81,8 @@ impl Router {
             });
             let mut payload = BytesMut::with_capacity(128);
             if codec.encode_event(&ev, &mut payload).is_ok() {
-                let framed = frame_payload(payload.freeze());
-                let _ = tx.try_send(framed);
+                // LengthDelimitedCodec handles framing automatically
+                let _ = tx.try_send(payload.freeze());
             }
         }
     }
