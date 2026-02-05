@@ -1,0 +1,12 @@
+# Engine configuration for gateway server
+# This file maps trading pairs to engine server addresses
+
+[[engines]]
+symbol_id = 1
+symbol_name = "BTC/USD"
+address = "127.0.0.1:9100"
+
+[[engines]]
+symbol_id = 2
+symbol_name = "ETH/USD"
+address = "127.0.0.1:9101"

@@ -331,7 +331,7 @@ impl Snapshot {
         entries.sort_by_key(|e| e.path());
         let latest = entries.last().unwrap();
 
-        Self::load_from_file(&latest.path())
+        Self::load_from_file(latest.path())
     }
 
     /// Load snapshot from specific file

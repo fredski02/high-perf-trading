@@ -1,7 +1,5 @@
 pub mod admin_server;
 pub mod config;
-pub mod connection;
-pub mod gateway;
-pub mod router;
+pub mod gateway_connection;
 
 pub use config::Args;

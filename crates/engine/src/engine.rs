@@ -148,7 +148,7 @@ impl Engine {
 
             // Periodic snapshot
             if self.config.snapshot_interval > 0
-                && self.command_seq % self.config.snapshot_interval == 0
+                && self.command_seq.is_multiple_of(self.config.snapshot_interval)
             {
                 if let Err(e) = self.take_snapshot() {
                     warn!("snapshot failed: {:#}", e);

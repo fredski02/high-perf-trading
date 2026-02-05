@@ -6,9 +6,9 @@ default:
 
 # ==================== Development ====================
 
-# Run gateway in dev mode with logging
+# Run engine server in dev mode with logging
 dev:
-  RUST_LOG=info cargo run -p server -- \
+  RUST_LOG=info cargo run -p engine_server -- \
     --binary-addr 127.0.0.1:9000 \
     --json-addr 127.0.0.1:9001 \
     --admin-addr 127.0.0.1:8080 \
@@ -17,9 +17,9 @@ dev:
     --journal-batch-size 100 \
     --snapshot-interval 100000
 
-# Run gateway with aggressive persistence for testing
+# Run engine server with aggressive persistence for testing
 dev-fast-snapshot:
-  RUST_LOG=info cargo run -p server -- \
+  RUST_LOG=info cargo run -p engine_server -- \
     --binary-addr 127.0.0.1:9000 \
     --json-addr 127.0.0.1:9001 \
     --admin-addr 127.0.0.1:8080 \
@@ -28,9 +28,9 @@ dev-fast-snapshot:
     --journal-batch-size 10 \
     --snapshot-interval 50
 
-# Run gateway with high-throughput settings (larger batches)
+# Run engine server with high-throughput settings (larger batches)
 dev-high-throughput:
-  RUST_LOG=info cargo run -p server -- \
+  RUST_LOG=info cargo run -p engine_server -- \
     --binary-addr 127.0.0.1:9000 \
     --json-addr 127.0.0.1:9001 \
     --admin-addr 127.0.0.1:8080 \
@@ -45,7 +45,7 @@ build:
 
 # Build and prepare for RTT benchmarking
 build-rtt:
-  cargo build --release --bin server --bin bench
+  cargo build --release --bin engine_server --bin bench
   @echo ""
   @echo "Ready for RTT benchmarking:"
   @echo "  Terminal 1: just dev"
@@ -128,7 +128,7 @@ test-persistence:
   @just clean-persistence
   @echo ""
   @echo "==> Step 2: Starting server in background with fast snapshots"
-  @cargo run --release -p server -- \
+  @cargo run --release -p engine_server -- \
     --journal-batch-size 5 \
     --snapshot-interval 10 > /tmp/server-persist.log 2>&1 &
   @echo "Waiting for gateway to start..."
@@ -248,8 +248,8 @@ bench-rtt iters="10000":
 
 # Profile with perf (Linux only)
 profile:
-  cargo build --release --bin server
-  perf record -F 99 -g -- ./target/release/gateway
+  cargo build --release --bin engine_server
+  perf record -F 99 -g -- ./target/release/engine_server
   perf script | inferno-collapse-perf | inferno-flamegraph > flamegraph.svg
   @echo "Flamegraph saved to flamegraph.svg"
 
@@ -263,10 +263,10 @@ clean:
 clean-all: clean clean-persistence
   @echo "Everything cleaned"
 
-# Kill any running gateway/bench processes
+# Kill any running engine_server/bench processes
 kill:
   @echo "Killing server and bench processes..."
-  @pkill -9 gateway 2>/dev/null && echo "✓ Killed gateway" || echo "No gateway running"
+  @pkill -9 engine_server 2>/dev/null && echo "✓ Killed engine_server" || echo "No engine_server running"
   @pkill -9 bench 2>/dev/null && echo "✓ Killed bench" || echo "No bench running"
 
 # ==================== Documentation ====================
@@ -283,7 +283,7 @@ tree:
 
 # Run release build with production settings
 prod:
-  RUST_LOG=warn ./target/release/gateway \
+  RUST_LOG=warn ./target/release/engine_server \
     --binary-addr 0.0.0.0:9000 \
     --json-addr 0.0.0.0:9001 \
     --admin-addr 0.0.0.0:8080 \

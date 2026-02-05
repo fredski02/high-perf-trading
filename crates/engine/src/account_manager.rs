@@ -55,7 +55,7 @@ impl AccountManager {
             return Err(RejectReason::Risk);
         }
         
-        if new_position < -(limits.max_short_position as i64) {
+        if new_position < -limits.max_short_position {
             return Err(RejectReason::Risk);
         }
         
@@ -71,7 +71,7 @@ impl AccountManager {
         price: i64,
         qty: i64,
     ) {
-        let pos = self.positions.entry(account_id).or_insert_with(Position::default);
+        let pos = self.positions.entry(account_id).or_default();
         
         match side {
             Side::Buy => {

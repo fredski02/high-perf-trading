@@ -5,8 +5,10 @@ members = [
   "crates/engine",
   "crates/codecs",
   "crates/persistence",
-  "crates/server",
+  "crates/engine_server",
+  "crates/gateway_server",
   "crates/bench",
+  "crates/test_client",
 ]
 
 [workspace.package]
@@ -26,6 +28,7 @@ crossbeam-channel = "0.5"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 postcard = { version = "1", features = ["use-std"] }
 crc32fast = "1"
 
@@ -36,6 +39,7 @@ futures = "0.3"
 
 clap = { version = "4", features = ["derive"] }
 slab = "0.4.11"
+dashmap = "6.1"
 # admin HTTP
 axum = "0.8.8"
 prometheus = "0.14.0"

@@ -1,0 +1,26 @@
+[package]
+name = "engine_server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "engine_server"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+engine = { path = "../engine" }
+codecs = { path = "../codecs" }
+persistence = { path = "../persistence" }
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+bytes.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+postcard.workspace = true

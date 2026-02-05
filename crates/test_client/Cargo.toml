@@ -1,0 +1,19 @@
+[package]
+name = "test_client"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test_client"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+bytes = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+postcard = { version = "1", features = ["alloc"] }

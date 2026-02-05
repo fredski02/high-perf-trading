@@ -1,0 +1,21 @@
+# Example engine configuration for gateway server
+# Copy this to engines.toml and configure your engine servers
+
+[[engines]]
+symbol_id = 1
+symbol_name = "BTC/USD"
+address = "127.0.0.1:9100"
+
+[[engines]]
+symbol_id = 2
+symbol_name = "ETH/USD"
+address = "127.0.0.1:9101"
+
+[[engines]]
+symbol_id = 3
+symbol_name = "SOL/USD"
+address = "127.0.0.1:9102"
+
+# Add more engines as needed...
+# Each engine should be listening on a unique port
+# and handling orders for a specific symbol_id

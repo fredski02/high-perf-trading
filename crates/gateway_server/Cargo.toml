@@ -1,16 +1,15 @@
 [package]
-name = "server"
+name = "gateway_server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "server"
+name = "gateway_server"
 path = "src/main.rs"
 
 [dependencies]
 common = { path = "../common" }
-engine = { path = "../engine" }
 codecs = { path = "../codecs" }
 persistence = { path = "../persistence" }
 tokio.workspace = true
@@ -23,3 +22,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 axum.workspace = true
+dashmap = "6.1"
+serde.workspace = true
+toml.workspace = true
+postcard.workspace = true
