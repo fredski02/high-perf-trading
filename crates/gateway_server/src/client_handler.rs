@@ -31,6 +31,13 @@ pub struct OrderMetadata {
     pub side: Side,
 }
 
+/// Client connection info for routing responses
+#[derive(Clone)]
+pub struct ClientInfo {
+    pub sender: mpsc::Sender<Bytes>,
+    pub codec: Arc<dyn Codec>,
+}
+
 /// Context shared across all client connections
 pub struct GatewayContext {
     pub account_manager: Arc<AccountManager>,
@@ -47,7 +54,7 @@ pub async fn handle_client_connection(
     codec: Arc<dyn Codec>,
     ctx: Arc<GatewayContext>,
     max_frame: usize,
-    client_senders: Arc<tokio::sync::RwLock<HashMap<u64, mpsc::Sender<Bytes>>>>,
+    client_senders: Arc<tokio::sync::RwLock<HashMap<u64, ClientInfo>>>,
 ) -> Result<()> {
     ctx.metrics.inc_connections();
 
@@ -65,7 +72,11 @@ pub async fn handle_client_connection(
     // Register this connection in the client_senders registry
     {
         let mut senders = client_senders.write().await;
-        senders.insert(conn_id, out_tx.clone());
+        let client_info = ClientInfo {
+            sender: out_tx.clone(),
+            codec: codec.clone(),
+        };
+        senders.insert(conn_id, client_info);
     }
 
     // Spawn write loop
@@ -288,8 +299,7 @@ async fn client_read_loop(
 /// 4. Sends event to client
 pub async fn handle_engine_responses(
     ctx: Arc<GatewayContext>,
-    codec: Arc<dyn Codec>,
-    client_senders: Arc<tokio::sync::RwLock<HashMap<u64, mpsc::Sender<Bytes>>>>,
+    client_senders: Arc<tokio::sync::RwLock<HashMap<u64, ClientInfo>>>,
 ) {
     loop {
         // Receive next event from any engine
@@ -305,29 +315,44 @@ pub async fn handle_engine_responses(
             EngineToGateway::ClientEvent { conn_id, event, risk_token: _ } => {
                 // Update account manager if this is a fill
                 if let Event::Fill(ref fill) = &event {
-                    // Look up the maker order metadata
-                    let pending_orders = ctx.pending_orders.read().await;
-                    if let Some(metadata) = pending_orders.get(&fill.maker_order_id) {
+                    // Handle BOTH maker and taker fills for account updates
+                    // First, collect the metadata we need while holding read lock
+                    let (maker_metadata, taker_metadata) = {
+                        let pending_orders = ctx.pending_orders.read().await;
+                        let maker = pending_orders.get(&fill.maker_order_id).cloned();
+                        let taker = pending_orders.get(&fill.taker_order_id).cloned();
+                        (maker, taker)
+                    }; // Read lock released
+                    
+                    // Update maker order account state
+                    if let Some(metadata) = maker_metadata {
                         let is_buy = metadata.side == Side::Buy;
-                        
-                        // Apply the fill to update account state
                         ctx.account_manager.apply_fill(&event, &metadata.reservation_token, is_buy);
                         
-                        // Note: We keep the order in pending_orders until it's fully filled or cancelled
-                        // For now, we assume fills are complete and remove it
-                        drop(pending_orders); // Release read lock
+                        // Remove from pending (assuming full fill for now)
                         ctx.pending_orders.write().await.remove(&fill.maker_order_id);
+                    }
+                    
+                    // Update taker order account state
+                    if let Some(metadata) = taker_metadata {
+                        let is_buy = metadata.side == Side::Buy;
+                        ctx.account_manager.apply_fill(&event, &metadata.reservation_token, is_buy);
+                        
+                        // Remove from pending (assuming full fill for now)
+                        ctx.pending_orders.write().await.remove(&fill.taker_order_id);
                     }
                 }
 
-                // Send event to client
+                // Send event to client using their codec
                 let clients = client_senders.read().await;
-                if let Some(client_tx) = clients.get(&conn_id) {
+                if let Some(client_info) = clients.get(&conn_id) {
                     let mut payload = bytes::BytesMut::with_capacity(256);
-                    if codec.encode_event(&event, &mut payload).is_ok() {
-                        let _ = client_tx.send(payload.freeze()).await;
+                    if client_info.codec.encode_event(&event, &mut payload).is_ok() {
+                        let _ = client_info.sender.send(payload.freeze()).await;
                         ctx.metrics.inc_frames_out();
                     }
+                } else {
+                    warn!("No client found for conn_id={}", conn_id);
                 }
             }
             EngineToGateway::MarketData { symbol_id, event } => {

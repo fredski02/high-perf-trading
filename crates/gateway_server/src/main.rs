@@ -20,7 +20,7 @@ use tracing_subscriber::EnvFilter;
 
 use account_manager::AccountManager;
 use engine_router::{EngineRouter, EnginesConfig};
-use client_handler::{GatewayContext, handle_client_connection, handle_engine_responses};
+use client_handler::{GatewayContext, ClientInfo, handle_client_connection, handle_engine_responses};
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -46,9 +46,11 @@ async fn main() -> anyhow::Result<()> {
     let account_manager = Arc::new(AccountManager::new());
     
     // TODO: Load accounts from snapshot/journal
-    // For now, create a test account
-    account_manager.create_account(1, 1_000_000); // Account 1 with $1M buying power
-    tracing::info!("Created test account: id=1, buying_power=1000000");
+    // For now, create test accounts
+    for account_id in 1..=10 {
+        account_manager.create_account(account_id, 1_000_000); // Each account with $1M buying power
+    }
+    tracing::info!("Created 10 test accounts (id=1-10), each with buying_power=1000000");
 
     // Load engine configuration and connect
     let engines_config = EnginesConfig::from_file(&args.engines_config)?;
@@ -69,8 +71,8 @@ async fn main() -> anyhow::Result<()> {
         pending_orders: Arc::new(RwLock::new(HashMap::new())),
     });
 
-    // Client senders registry (conn_id -> mpsc sender)
-    let client_senders: Arc<RwLock<HashMap<u64, tokio::sync::mpsc::Sender<bytes::Bytes>>>> = 
+    // Client senders registry (conn_id -> ClientInfo with codec)
+    let client_senders: Arc<RwLock<HashMap<u64, ClientInfo>>> = 
         Arc::new(RwLock::new(HashMap::new()));
 
     // Spawn admin server (TODO: implement)
@@ -79,10 +81,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn background task to handle engine responses
     let ctx_responses = ctx.clone();
-    let codec_responses = Arc::new(BinaryCodec) as Arc<dyn codecs::Codec>;
     let client_senders_responses = client_senders.clone();
     tokio::spawn(async move {
-        handle_engine_responses(ctx_responses, codec_responses, client_senders_responses).await;
+        handle_engine_responses(ctx_responses, client_senders_responses).await;
     });
 
     // Spawn TCP listeners for clients
@@ -140,7 +141,7 @@ async fn run_listener(
     codec: Arc<dyn codecs::Codec>,
     ctx: Arc<GatewayContext>,
     max_frame: usize,
-    client_senders: Arc<RwLock<HashMap<u64, tokio::sync::mpsc::Sender<bytes::Bytes>>>>,
+    client_senders: Arc<RwLock<HashMap<u64, ClientInfo>>>,
 ) -> anyhow::Result<()> {
     loop {
         let (stream, _addr) = listener.accept().await?;

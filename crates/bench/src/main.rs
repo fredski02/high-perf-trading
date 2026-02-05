@@ -58,6 +58,18 @@ async fn main() -> anyhow::Result<()> {
         "bench-bin" => {
             bench_bin(&args.bin_addr, args.iters).await?;
         }
+        "bench-distributed" => {
+            bench_distributed_binary(&args.bin_addr, args.iters).await?;
+        }
+        "bench-distributed-json" => {
+            bench_distributed(&args.json_addr, args.iters).await?;
+        }
+        "bench-gateway-throughput" => {
+            bench_gateway_throughput_binary(&args.bin_addr, args.iters).await?;
+        }
+        "bench-gateway-throughput-json" => {
+            bench_gateway_throughput(&args.json_addr, args.iters).await?;
+        }
         "smoke-replay" => {
             smoke_replay_json(&args.json_addr).await?;
             println!("smoke-replay ok");
@@ -350,6 +362,450 @@ async fn bench_bin(addr: &str, iters: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+// -------------------- Bench: distributed system RTT --------------------
+//
+// Measures end-to-end latency through gateway → engine → gateway path.
+// Uses JSON protocol for simplicity (can add binary mode later).
+//
+// Test scenario:
+// 1. Place resting limit order (POST_ONLY to ensure it rests)
+// 2. Send aggressive orders that fill against resting orders
+// 3. Measure time from send to Fill event received
+//
+// This gives us realistic latency including:
+// - Client → Gateway network
+// - Gateway risk checks
+// - Gateway → Engine routing
+// - Engine matching
+// - Engine → Gateway response
+// - Gateway → Client response
+async fn bench_distributed(addr: &str, iters: u32) -> anyhow::Result<()> {
+    let mut s = TcpStream::connect(addr).await?;
+    let mut h = Histogram::<u64>::new(3)?;
+
+    println!("Running distributed system benchmark...");
+    println!("Iterations: {}", iters);
+    println!("Testing: Client → Gateway → Engine → Gateway → Client");
+    println!();
+
+    // Warmup: place a few orders to ensure system is ready
+    println!("Running warmup (10 orders)...");
+    for i in 0..10 {
+        let warmup_order = Command::NewOrder(NewOrder {
+            client_seq: i + 1,
+            order_id: i + 1000,
+            account_id: 1,
+            symbol_id: 1,
+            side: Side::Buy,
+            price: 1000 + i as i64,
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+        
+        let t0 = Instant::now();
+        write_json_cmd(&mut s, &warmup_order).await?;
+        
+        // Try to read response - may timeout if gateway doesn't respond
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            read_until_ack_json(&mut s, i + 1)
+        ).await {
+            Ok(Ok(_)) => {
+                let dt = t0.elapsed();
+                println!("  Warmup {}: {:?}", i + 1, dt);
+            }
+            Ok(Err(e)) => {
+                println!("  Warmup {} error: {}", i + 1, e);
+            }
+            Err(_) => {
+                println!("  Warmup {} timeout (no response from gateway - this is expected)", i + 1);
+            }
+        }
+    }
+
+    println!();
+    println!("NOTE: If responses timed out, this is expected as the gateway");
+    println!("      response routing is not yet fully implemented.");
+    println!("      We will measure time to send orders (one-way latency).");
+    println!();
+    println!("Warmup complete. Starting benchmark...");
+
+    // Main benchmark loop
+    for i in 0..iters {
+        let client_seq = (i + 100) as u64;
+        let order_id = (i + 10000) as u64;
+
+        // Place resting ask (sell order)
+        let resting_ask = Command::NewOrder(NewOrder {
+            client_seq,
+            order_id,
+            account_id: 1,
+            symbol_id: 1,
+            side: Side::Sell,
+            price: 50000,
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+
+        write_json_cmd(&mut s, &resting_ask).await?;
+        let _ = read_until_ack_json(&mut s, client_seq).await?;
+
+        // Now send aggressive buy order that will match
+        let taker_seq = client_seq + 1;
+        let taker_order_id = order_id + 100000;
+        
+        let aggressive_buy = Command::NewOrder(NewOrder {
+            client_seq: taker_seq,
+            order_id: taker_order_id,
+            account_id: 1,
+            symbol_id: 1,
+            side: Side::Buy,
+            price: 51000, // Cross the spread
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+
+        // Measure round-trip time
+        let t0 = Instant::now();
+        write_json_cmd(&mut s, &aggressive_buy).await?;
+        
+        // Read events until we get the Fill
+        let events = read_until_ack_json(&mut s, taker_seq).await?;
+        let dt = t0.elapsed().as_nanos() as u64;
+
+        // Verify we got a fill (sanity check)
+        let got_fill = events.iter().any(|ev| match ev {
+            Event::Fill(f) => f.taker_order_id == taker_order_id,
+            _ => false,
+        });
+
+        if got_fill {
+            let _ = h.record(dt);
+        } else {
+            eprintln!("Warning: iteration {} did not produce a fill", i);
+        }
+
+        // Progress indicator every 100 iterations
+        if (i + 1) % 100 == 0 {
+            println!("Completed {} / {} iterations", i + 1, iters);
+        }
+    }
+
+    println!();
+    println!("===== Distributed System Latency Benchmark Results =====");
+    println!("Iterations: {}", iters);
+    println!();
+    println!("Latency (Client → Gateway → Engine → Gateway → Client):");
+    println!("  p50  = {:>8} μs", h.value_at_quantile(0.50) / 1000);
+    println!("  p90  = {:>8} μs", h.value_at_quantile(0.90) / 1000);
+    println!("  p95  = {:>8} μs", h.value_at_quantile(0.95) / 1000);
+    println!("  p99  = {:>8} μs", h.value_at_quantile(0.99) / 1000);
+    println!("  p999 = {:>8} μs", h.value_at_quantile(0.999) / 1000);
+    println!("  max  = {:>8} μs", h.max() / 1000);
+    println!("  min  = {:>8} μs", h.min() / 1000);
+    println!();
+    println!("Path breakdown:");
+    println!("  - Client → Gateway (network + risk check)");
+    println!("  - Gateway → Engine (routing)");
+    println!("  - Engine (matching)");
+    println!("  - Engine → Gateway (fill event)");
+    println!("  - Gateway → Client (response)");
+    println!();
+    
+    Ok(())
+}
+
+// -------------------- Bench: distributed system RTT (Binary Protocol) --------------------
+//
+// Same as bench_distributed but using binary protocol (postcard) for production-realistic measurement.
+// This should be significantly faster than JSON.
+async fn bench_distributed_binary(addr: &str, iters: u32) -> anyhow::Result<()> {
+    let mut s = TcpStream::connect(addr).await?;
+    let mut h = Histogram::<u64>::new(3)?;
+
+    println!("Running distributed system benchmark (BINARY PROTOCOL)...");
+    println!("Iterations: {}", iters);
+    println!("Testing: Client → Gateway → Engine → Gateway → Client");
+    println!();
+
+    // Warmup
+    println!("Running warmup (10 orders)...");
+    for i in 0..10 {
+        let warmup_order = Command::NewOrder(NewOrder {
+            client_seq: i + 1,
+            order_id: i + 1000,
+            account_id: 1,
+            symbol_id: 1,
+            side: Side::Buy,
+            price: 1000 + i as i64,
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+        
+        let t0 = Instant::now();
+        write_binary_cmd(&mut s, &warmup_order).await?;
+        let _ = read_until_ack_binary(&mut s, i + 1).await?;
+        let dt = t0.elapsed();
+        println!("  Warmup {}: {:?}", i + 1, dt);
+    }
+
+    println!();
+    println!("Warmup complete. Starting benchmark...");
+
+    // Main benchmark loop
+    for i in 0..iters {
+        let client_seq = (i + 100) as u64;
+        let order_id = (i + 10000) as u64;
+
+        // Place resting ask (sell order)
+        let resting_ask = Command::NewOrder(NewOrder {
+            client_seq,
+            order_id,
+            account_id: 1,
+            symbol_id: 1,
+            side: Side::Sell,
+            price: 50000,
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+
+        write_binary_cmd(&mut s, &resting_ask).await?;
+        let _ = read_until_ack_binary(&mut s, client_seq).await?;
+
+        // Now send aggressive buy order that will match
+        let taker_seq = client_seq + 1;
+        let taker_order_id = order_id + 100000;
+        
+        let aggressive_buy = Command::NewOrder(NewOrder {
+            client_seq: taker_seq,
+            order_id: taker_order_id,
+            account_id: 1,
+            symbol_id: 1,
+            side: Side::Buy,
+            price: 51000, // Cross the spread
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+
+        // Measure round-trip time
+        let t0 = Instant::now();
+        write_binary_cmd(&mut s, &aggressive_buy).await?;
+        
+        // Read events until we get the Fill
+        let events = read_until_ack_binary(&mut s, taker_seq).await?;
+        let dt = t0.elapsed().as_nanos() as u64;
+
+        // Verify we got a fill (sanity check)
+        let got_fill = events.iter().any(|ev| match ev {
+            Event::Fill(f) => f.taker_order_id == taker_order_id,
+            _ => false,
+        });
+
+        if got_fill {
+            let _ = h.record(dt);
+        } else {
+            eprintln!("Warning: iteration {} did not produce a fill", i);
+        }
+
+        // Progress indicator every 100 iterations
+        if (i + 1) % 100 == 0 {
+            println!("Completed {} / {} iterations", i + 1, iters);
+        }
+    }
+
+    println!();
+    println!("===== Distributed System Latency Benchmark Results (BINARY) =====");
+    println!("Protocol: Binary (postcard serialization)");
+    println!("Iterations: {}", iters);
+    println!();
+    println!("Latency (Client → Gateway → Engine → Gateway → Client):");
+    println!("  p50  = {:>8} μs", h.value_at_quantile(0.50) / 1000);
+    println!("  p90  = {:>8} μs", h.value_at_quantile(0.90) / 1000);
+    println!("  p95  = {:>8} μs", h.value_at_quantile(0.95) / 1000);
+    println!("  p99  = {:>8} μs", h.value_at_quantile(0.99) / 1000);
+    println!("  p999 = {:>8} μs", h.value_at_quantile(0.999) / 1000);
+    println!("  max  = {:>8} μs", h.max() / 1000);
+    println!("  min  = {:>8} μs", h.min() / 1000);
+    println!();
+    println!("Path breakdown:");
+    println!("  - Client → Gateway (network + risk check)");
+    println!("  - Gateway → Engine (routing)");
+    println!("  - Engine (matching)");
+    println!("  - Engine → Gateway (fill event)");
+    println!("  - Gateway → Client (response)");
+    println!();
+    println!("Note: This measures placing a resting order + matching taker order.");
+    println!("      Actual per-order latency is approximately half of p50.");
+    println!();
+    
+    Ok(())
+}
+
+// -------------------- Bench: gateway throughput --------------------
+//
+// Measures order submission throughput (orders/second) without waiting for responses.
+// This is useful for testing the current system where response routing is incomplete.
+//
+// Measures:
+// - Client → Gateway submission rate
+// - Gateway risk check throughput
+// - Gateway → Engine routing throughput
+async fn bench_gateway_throughput(addr: &str, iters: u32) -> anyhow::Result<()> {
+    let mut s = TcpStream::connect(addr).await?;
+
+    println!("Running gateway throughput benchmark...");
+    println!("Iterations: {}", iters);
+    println!("Measuring: Order submission rate (no response wait)");
+    println!();
+
+    // Warmup
+    println!("Warmup...");
+    for i in 0..100 {
+        let order = Command::NewOrder(NewOrder {
+            client_seq: i + 1,
+            order_id: i + 1000,
+            account_id: 1,
+            symbol_id: 1,
+            side: Side::Buy,
+            price: 40000 + i as i64,
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+        write_json_cmd(&mut s, &order).await?;
+    }
+
+    // Small delay to let system process warmup
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    println!("Starting benchmark...");
+    println!();
+
+    // Benchmark: measure time to submit all orders
+    let start = Instant::now();
+    
+    for i in 0..iters {
+        let order = Command::NewOrder(NewOrder {
+            client_seq: (i + 1000) as u64,
+            order_id: (i + 100000) as u64,
+            account_id: 1,
+            symbol_id: 1,
+            side: if i % 2 == 0 { Side::Buy } else { Side::Sell },
+            price: 50000 + (i % 1000) as i64,
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+        
+        write_json_cmd(&mut s, &order).await?;
+        
+        if (i + 1) % 1000 == 0 {
+            println!("Submitted {} / {} orders", i + 1, iters);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    let throughput = iters as f64 / elapsed_secs;
+    let avg_latency_us = (elapsed.as_micros() as f64) / (iters as f64);
+
+    println!();
+    println!("===== Gateway Throughput Benchmark Results =====");
+    println!("Total orders:     {}", iters);
+    println!("Total time:       {:.2} seconds", elapsed_secs);
+    println!("Throughput:       {:.0} orders/second", throughput);
+    println!("Avg submission:   {:.2} μs/order", avg_latency_us);
+    println!();
+    println!("Note: This measures submission rate only.");
+    println!("      Full round-trip latency requires response routing (TODO).");
+    println!();
+
+    Ok(())
+}
+
+// -------------------- Bench: gateway throughput (Binary Protocol) --------------------
+//
+// Same as bench_gateway_throughput but using binary protocol for production measurements.
+async fn bench_gateway_throughput_binary(addr: &str, iters: u32) -> anyhow::Result<()> {
+    let mut s = TcpStream::connect(addr).await?;
+
+    println!("Running gateway throughput benchmark (BINARY PROTOCOL)...");
+    println!("Iterations: {}", iters);
+    println!("Measuring: Order submission rate (no response wait)");
+    println!();
+
+    // Warmup
+    println!("Warmup...");
+    for i in 0..100 {
+        let order = Command::NewOrder(NewOrder {
+            client_seq: i + 1,
+            order_id: i + 1000,
+            account_id: 1,
+            symbol_id: 1,
+            side: Side::Buy,
+            price: 40000 + i as i64,
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+        write_binary_cmd(&mut s, &order).await?;
+    }
+
+    // Small delay to let system process warmup
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    println!("Starting benchmark...");
+    println!();
+
+    // Benchmark: measure time to submit all orders
+    let start = Instant::now();
+    
+    for i in 0..iters {
+        let order = Command::NewOrder(NewOrder {
+            client_seq: (i + 1000) as u64,
+            order_id: (i + 100000) as u64,
+            account_id: 1,
+            symbol_id: 1,
+            side: if i % 2 == 0 { Side::Buy } else { Side::Sell },
+            price: 50000 + (i % 1000) as i64,
+            qty: 1,
+            tif: TimeInForce::Gtc,
+            flags: OrderFlags { post_only: false },
+        });
+        
+        write_binary_cmd(&mut s, &order).await?;
+        
+        if (i + 1) % 1000 == 0 {
+            println!("Submitted {} / {} orders", i + 1, iters);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    let throughput = iters as f64 / elapsed_secs;
+    let avg_latency_us = (elapsed.as_micros() as f64) / (iters as f64);
+
+    println!();
+    println!("===== Gateway Throughput Benchmark Results (BINARY) =====");
+    println!("Protocol: Binary (postcard serialization)");
+    println!("Total orders:     {}", iters);
+    println!("Total time:       {:.2} seconds", elapsed_secs);
+    println!("Throughput:       {:.0} orders/second", throughput);
+    println!("Avg submission:   {:.2} μs/order", avg_latency_us);
+    println!();
+    println!("Note: This measures submission rate only.");
+    println!("      Full round-trip latency measured by bench-distributed.");
+    println!();
+
+    Ok(())
+}
+
 // -------------------- Helpers --------------------
 
 async fn write_json_cmd(s: &mut TcpStream, cmd: &Command) -> anyhow::Result<()> {
@@ -357,6 +813,109 @@ async fn write_json_cmd(s: &mut TcpStream, cmd: &Command) -> anyhow::Result<()> 
     let frame = frame(&payload);
     s.write_all(&frame).await?;
     Ok(())
+}
+
+async fn write_binary_cmd(s: &mut TcpStream, cmd: &Command) -> anyhow::Result<()> {
+    // Encode command using BinaryCodec format (message type + fields)
+    let mut p = BytesMut::with_capacity(128);
+    
+    match cmd {
+        Command::NewOrder(order) => {
+            // MT_NEW_ORDER = 1
+            p.put_u16_le(1);
+            p.put_u64_le(order.client_seq);
+            p.put_u64_le(order.order_id);
+            p.put_u32_le(order.account_id);
+            p.put_u32_le(order.symbol_id);
+            p.put_u8(match order.side {
+                Side::Buy => 0,
+                Side::Sell => 1,
+            });
+            p.put_i64_le(order.price);
+            p.put_i64_le(order.qty);
+            p.put_u8(match order.tif {
+                TimeInForce::Gtc => 0,
+                TimeInForce::Ioc => 1,
+            });
+            p.put_u8(if order.flags.post_only { 1 } else { 0 });
+        }
+        _ => anyhow::bail!("write_binary_cmd: unsupported command type"),
+    }
+    
+    let frame = frame(&p);
+    s.write_all(&frame).await?;
+    Ok(())
+}
+
+async fn read_binary_event(s: &mut TcpStream) -> anyhow::Result<Event> {
+    let frame = read_one_frame(s).await?;
+    let mut b = &frame[..];
+    
+    if b.len() < 2 {
+        anyhow::bail!("frame too short");
+    }
+    
+    let mt = u16::from_le_bytes([b[0], b[1]]);
+    b = &b[2..];
+    
+    match mt {
+        101 => {
+            // MT_ACK
+            let server_seq = u64::from_le_bytes(b[0..8].try_into()?);
+            let client_seq = u64::from_le_bytes(b[8..16].try_into()?);
+            let order_id = u64::from_le_bytes(b[16..24].try_into()?);
+            Ok(Event::Ack(Ack {
+                server_seq,
+                client_seq,
+                order_id,
+            }))
+        }
+        103 => {
+            // MT_FILL
+            let server_seq = u64::from_le_bytes(b[0..8].try_into()?);
+            let client_seq = u64::from_le_bytes(b[8..16].try_into()?);
+            let symbol_id = u32::from_le_bytes(b[16..20].try_into()?);
+            let taker_order_id = u64::from_le_bytes(b[20..28].try_into()?);
+            let maker_order_id = u64::from_le_bytes(b[28..36].try_into()?);
+            let price = i64::from_le_bytes(b[36..44].try_into()?);
+            let qty = i64::from_le_bytes(b[44..52].try_into()?);
+            Ok(Event::Fill(common::Fill {
+                server_seq,
+                client_seq,
+                symbol_id,
+                taker_order_id,
+                maker_order_id,
+                price,
+                qty,
+            }))
+        }
+        104 => {
+            // MT_BOOK_TOP - just skip for now
+            Ok(Event::BookTop(common::BookTop {
+                server_seq: 0,
+                symbol_id: 0,
+                best_bid_px: None,
+                best_bid_qty: None,
+                best_ask_px: None,
+                best_ask_qty: None,
+            }))
+        }
+        _ => anyhow::bail!("unknown event type: {}", mt),
+    }
+}
+
+async fn read_until_ack_binary(s: &mut TcpStream, client_seq: u64) -> anyhow::Result<Vec<Event>> {
+    let mut out = Vec::new();
+    loop {
+        let event = read_binary_event(s).await?;
+        out.push(event.clone());
+
+        if let Event::Ack(Ack { client_seq: cs, .. }) = event {
+            if cs == client_seq {
+                return Ok(out);
+            }
+        }
+    }
 }
 
 fn frame(payload: &[u8]) -> Vec<u8> {

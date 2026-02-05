@@ -176,6 +176,7 @@ dependencies = [
  "clap",
  "common",
  "hdrhistogram",
+ "postcard",
  "serde_json",
  "tokio",
 ]
