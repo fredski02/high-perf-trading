@@ -22,13 +22,13 @@ use crc32fast::Hasher;
 pub struct Journal {
     file: File,
     path: PathBuf,
-    
+
     // Batching config
     batch_buffer: Vec<Command>,
     batch_size: usize,
     last_sync: Instant,
     sync_interval: Duration,
-    
+
     // Stats
     commands_written: u64,
     commands_since_rotation: u64,
@@ -40,10 +40,10 @@ pub struct Journal {
 pub struct JournalConfig {
     /// Number of commands to buffer before fsync (0 = sync every command)
     pub batch_size: usize,
-    
+
     /// Max duration between fsyncs
     pub sync_interval: Duration,
-    
+
     /// Rotate journal after this many commands (0 = never rotate)
     pub rotation_threshold: u64,
 }
@@ -70,7 +70,7 @@ impl Journal {
             .read(true)
             .append(true)
             .open(&path)?;
-            
+
         Ok(Self {
             file,
             path,
@@ -88,14 +88,14 @@ impl Journal {
     #[inline]
     pub fn append(&mut self, cmd: &Command) -> anyhow::Result<()> {
         self.batch_buffer.push(*cmd);
-        
+
         let should_flush = self.batch_buffer.len() >= self.batch_size
             || self.last_sync.elapsed() >= self.sync_interval;
-            
+
         if should_flush {
             self.flush()?;
         }
-        
+
         Ok(())
     }
 
@@ -107,7 +107,7 @@ impl Journal {
 
         // Drain commands into a temporary vec to avoid borrow checker issues
         let commands: Vec<Command> = self.batch_buffer.drain(..).collect();
-        
+
         for cmd in commands {
             self.write_frame(&cmd)?;
             self.commands_written += 1;
@@ -119,12 +119,12 @@ impl Journal {
         {
             self.file.sync_data()?; // faster than sync_all (no metadata sync)
         }
-        
+
         #[cfg(not(unix))]
         {
             self.file.sync_all()?;
         }
-        
+
         self.last_sync = Instant::now();
         Ok(())
     }
@@ -169,7 +169,11 @@ impl Journal {
 
             // Sanity check
             if len > 10 * 1024 * 1024 {
-                anyhow::bail!("corrupt journal: frame too large ({} bytes) at offset {}", len, offset);
+                anyhow::bail!(
+                    "corrupt journal: frame too large ({} bytes) at offset {}",
+                    len,
+                    offset
+                );
             }
 
             let mut buf = vec![0u8; len];
@@ -229,7 +233,7 @@ impl Journal {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         let stem = self.path.file_stem().unwrap_or_default().to_string_lossy();
         let backup_path = parent.join(format!("{}_{}.bin", stem, ts));
@@ -300,7 +304,12 @@ impl Snapshot {
 
         file.sync_all()?;
 
-        tracing::info!("snapshot saved: {:?} (seq={}, size={})", path, self.sequence, self.data.len());
+        tracing::info!(
+            "snapshot saved: {:?} (seq={}, size={})",
+            path,
+            self.sequence,
+            self.data.len()
+        );
 
         Ok(path)
     }
@@ -372,7 +381,12 @@ impl Snapshot {
             }
         }
 
-        tracing::info!("snapshot loaded: {:?} (seq={}, size={})", path, sequence, data.len());
+        tracing::info!(
+            "snapshot loaded: {:?} (seq={}, size={})",
+            path,
+            sequence,
+            data.len()
+        );
 
         Ok(Some(Self { sequence, data }))
     }

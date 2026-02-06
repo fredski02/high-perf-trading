@@ -1,10 +1,10 @@
-pub mod types;
-pub mod metrics;
 pub mod gateway_protocol;
+pub mod metrics;
+pub mod types;
 
-pub use types::*;
-pub use metrics::Metrics;
 pub use gateway_protocol::*;
+pub use metrics::Metrics;
+pub use types::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtoError {

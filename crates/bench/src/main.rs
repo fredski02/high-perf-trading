@@ -402,15 +402,17 @@ async fn bench_distributed(addr: &str, iters: u32) -> anyhow::Result<()> {
             tif: TimeInForce::Gtc,
             flags: OrderFlags { post_only: false },
         });
-        
+
         let t0 = Instant::now();
         write_json_cmd(&mut s, &warmup_order).await?;
-        
+
         // Try to read response - may timeout if gateway doesn't respond
         match tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            read_until_ack_json(&mut s, i + 1)
-        ).await {
+            read_until_ack_json(&mut s, i + 1),
+        )
+        .await
+        {
             Ok(Ok(_)) => {
                 let dt = t0.elapsed();
                 println!("  Warmup {}: {:?}", i + 1, dt);
@@ -419,7 +421,10 @@ async fn bench_distributed(addr: &str, iters: u32) -> anyhow::Result<()> {
                 println!("  Warmup {} error: {}", i + 1, e);
             }
             Err(_) => {
-                println!("  Warmup {} timeout (no response from gateway - this is expected)", i + 1);
+                println!(
+                    "  Warmup {} timeout (no response from gateway - this is expected)",
+                    i + 1
+                );
             }
         }
     }
@@ -455,7 +460,7 @@ async fn bench_distributed(addr: &str, iters: u32) -> anyhow::Result<()> {
         // Now send aggressive buy order that will match
         let taker_seq = client_seq + 1;
         let taker_order_id = order_id + 100000;
-        
+
         let aggressive_buy = Command::NewOrder(NewOrder {
             client_seq: taker_seq,
             order_id: taker_order_id,
@@ -471,7 +476,7 @@ async fn bench_distributed(addr: &str, iters: u32) -> anyhow::Result<()> {
         // Measure round-trip time
         let t0 = Instant::now();
         write_json_cmd(&mut s, &aggressive_buy).await?;
-        
+
         // Read events until we get the Fill
         let events = read_until_ack_json(&mut s, taker_seq).await?;
         let dt = t0.elapsed().as_nanos() as u64;
@@ -514,7 +519,7 @@ async fn bench_distributed(addr: &str, iters: u32) -> anyhow::Result<()> {
     println!("  - Engine → Gateway (fill event)");
     println!("  - Gateway → Client (response)");
     println!();
-    
+
     Ok(())
 }
 
@@ -545,7 +550,7 @@ async fn bench_distributed_binary(addr: &str, iters: u32) -> anyhow::Result<()> 
             tif: TimeInForce::Gtc,
             flags: OrderFlags { post_only: false },
         });
-        
+
         let t0 = Instant::now();
         write_binary_cmd(&mut s, &warmup_order).await?;
         let _ = read_until_ack_binary(&mut s, i + 1).await?;
@@ -580,7 +585,7 @@ async fn bench_distributed_binary(addr: &str, iters: u32) -> anyhow::Result<()> 
         // Now send aggressive buy order that will match
         let taker_seq = client_seq + 1;
         let taker_order_id = order_id + 100000;
-        
+
         let aggressive_buy = Command::NewOrder(NewOrder {
             client_seq: taker_seq,
             order_id: taker_order_id,
@@ -596,7 +601,7 @@ async fn bench_distributed_binary(addr: &str, iters: u32) -> anyhow::Result<()> 
         // Measure round-trip time
         let t0 = Instant::now();
         write_binary_cmd(&mut s, &aggressive_buy).await?;
-        
+
         // Read events until we get the Fill
         let events = read_until_ack_binary(&mut s, taker_seq).await?;
         let dt = t0.elapsed().as_nanos() as u64;
@@ -643,7 +648,7 @@ async fn bench_distributed_binary(addr: &str, iters: u32) -> anyhow::Result<()> 
     println!("Note: This measures placing a resting order + matching taker order.");
     println!("      Actual per-order latency is approximately half of p50.");
     println!();
-    
+
     Ok(())
 }
 
@@ -689,7 +694,7 @@ async fn bench_gateway_throughput(addr: &str, iters: u32) -> anyhow::Result<()> 
 
     // Benchmark: measure time to submit all orders
     let start = Instant::now();
-    
+
     for i in 0..iters {
         let order = Command::NewOrder(NewOrder {
             client_seq: (i + 1000) as u64,
@@ -702,9 +707,9 @@ async fn bench_gateway_throughput(addr: &str, iters: u32) -> anyhow::Result<()> 
             tif: TimeInForce::Gtc,
             flags: OrderFlags { post_only: false },
         });
-        
+
         write_json_cmd(&mut s, &order).await?;
-        
+
         if (i + 1) % 1000 == 0 {
             println!("Submitted {} / {} orders", i + 1, iters);
         }
@@ -765,7 +770,7 @@ async fn bench_gateway_throughput_binary(addr: &str, iters: u32) -> anyhow::Resu
 
     // Benchmark: measure time to submit all orders
     let start = Instant::now();
-    
+
     for i in 0..iters {
         let order = Command::NewOrder(NewOrder {
             client_seq: (i + 1000) as u64,
@@ -778,9 +783,9 @@ async fn bench_gateway_throughput_binary(addr: &str, iters: u32) -> anyhow::Resu
             tif: TimeInForce::Gtc,
             flags: OrderFlags { post_only: false },
         });
-        
+
         write_binary_cmd(&mut s, &order).await?;
-        
+
         if (i + 1) % 1000 == 0 {
             println!("Submitted {} / {} orders", i + 1, iters);
         }
@@ -818,7 +823,7 @@ async fn write_json_cmd(s: &mut TcpStream, cmd: &Command) -> anyhow::Result<()> 
 async fn write_binary_cmd(s: &mut TcpStream, cmd: &Command) -> anyhow::Result<()> {
     // Encode command using BinaryCodec format (message type + fields)
     let mut p = BytesMut::with_capacity(128);
-    
+
     match cmd {
         Command::NewOrder(order) => {
             // MT_NEW_ORDER = 1
@@ -841,7 +846,7 @@ async fn write_binary_cmd(s: &mut TcpStream, cmd: &Command) -> anyhow::Result<()
         }
         _ => anyhow::bail!("write_binary_cmd: unsupported command type"),
     }
-    
+
     let frame = frame(&p);
     s.write_all(&frame).await?;
     Ok(())
@@ -850,14 +855,14 @@ async fn write_binary_cmd(s: &mut TcpStream, cmd: &Command) -> anyhow::Result<()
 async fn read_binary_event(s: &mut TcpStream) -> anyhow::Result<Event> {
     let frame = read_one_frame(s).await?;
     let mut b = &frame[..];
-    
+
     if b.len() < 2 {
         anyhow::bail!("frame too short");
     }
-    
+
     let mt = u16::from_le_bytes([b[0], b[1]]);
     b = &b[2..];
-    
+
     match mt {
         101 => {
             // MT_ACK

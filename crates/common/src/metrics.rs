@@ -116,8 +116,17 @@ impl Metrics {
             exchange_snapshots_total {}
             exchange_journal_rotations_total {}
             ",
-            c, fi, fo, fills, rejects, depth,
-            journal_appends, journal_flushes, journal_errors, snapshots, rotations
+            c,
+            fi,
+            fo,
+            fills,
+            rejects,
+            depth,
+            journal_appends,
+            journal_flushes,
+            journal_errors,
+            snapshots,
+            rotations
         )
     }
 }

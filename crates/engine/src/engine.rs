@@ -10,8 +10,8 @@ use common::Metrics;
 use persistence::{Journal, JournalConfig, Snapshot};
 
 use common::{
-    Ack, AccountState, BookTop, Command, Event, Fill, NewOrder, QueryAccount, Reject,
-    RejectReason, RiskLimits, SetRiskLimits, TimeInForce,
+    AccountState, Ack, BookTop, Command, Event, Fill, NewOrder, QueryAccount, Reject, RejectReason,
+    RiskLimits, SetRiskLimits, TimeInForce,
 };
 
 pub struct EngineConfig {
@@ -41,7 +41,7 @@ pub struct Engine {
     // v1: single symbol
     book: OrderBook,
     metrics: Arc<Metrics>,
-    
+
     // Persistence
     journal: Journal,
     config: EngineConfig,
@@ -61,8 +61,9 @@ impl Engine {
         metrics: Arc<Metrics>,
         config: EngineConfig,
     ) -> Self {
-        let journal = Journal::open_with_config(&config.journal_path, config.journal_config.clone())
-            .expect("failed to open journal");
+        let journal =
+            Journal::open_with_config(&config.journal_path, config.journal_config.clone())
+                .expect("failed to open journal");
 
         Self {
             rx,
@@ -82,19 +83,19 @@ impl Engine {
         // Try to load latest snapshot
         if let Some(snapshot) = Snapshot::load_latest(&self.config.snapshot_dir)? {
             info!("restoring from snapshot: seq={}", snapshot.sequence);
-            
+
             // Deserialize combined snapshot
             #[derive(serde::Serialize, serde::Deserialize)]
             struct EngineSnapshot {
                 book: Vec<u8>,
                 accounts: Vec<u8>,
             }
-            
+
             let combined: EngineSnapshot = postcard::from_bytes(&snapshot.data)?;
-            
+
             self.book.restore_from_snapshot(&combined.book)?;
             self.account_manager = postcard::from_bytes(&combined.accounts)?;
-            
+
             self.command_seq = snapshot.sequence;
             self.server_seq = snapshot.sequence + 1; // server_seq continues from snapshot
         }
@@ -102,11 +103,15 @@ impl Engine {
         // Replay journal commands after snapshot
         let all_cmds = self.journal.read_all()?;
         let replay_start = self.command_seq as usize;
-        
+
         if replay_start < all_cmds.len() {
             let replay_cmds = &all_cmds[replay_start..];
-            info!("replaying {} commands from journal (after seq={})", replay_cmds.len(), self.command_seq);
-            
+            info!(
+                "replaying {} commands from journal (after seq={})",
+                replay_cmds.len(),
+                self.command_seq
+            );
+
             for cmd in replay_cmds {
                 self.replay_command(*cmd);
             }
@@ -148,7 +153,9 @@ impl Engine {
 
             // Periodic snapshot
             if self.config.snapshot_interval > 0
-                && self.command_seq.is_multiple_of(self.config.snapshot_interval)
+                && self
+                    .command_seq
+                    .is_multiple_of(self.config.snapshot_interval)
             {
                 if let Err(e) = self.take_snapshot() {
                     warn!("snapshot failed: {:#}", e);
@@ -173,21 +180,21 @@ impl Engine {
         // Serialize both book and account manager state
         let book_data = self.book.serialize_snapshot()?;
         let account_data = postcard::to_stdvec(&self.account_manager)?;
-        
+
         // Combine both into a single snapshot structure
         #[derive(serde::Serialize, serde::Deserialize)]
         struct EngineSnapshot {
             book: Vec<u8>,
             accounts: Vec<u8>,
         }
-        
+
         let combined = EngineSnapshot {
             book: book_data,
             accounts: account_data,
         };
-        
+
         let data = postcard::to_stdvec(&combined)?;
-        
+
         let snapshot = Snapshot {
             sequence: self.command_seq,
             data,
@@ -205,9 +212,9 @@ impl Engine {
     pub fn process(&mut self, cmd: Command) -> Vec<Event> {
         match cmd {
             Command::NewOrder(no) => self.handle_new(no),
-            
+
             Command::SetRiskLimits(srl) => self.handle_set_risk_limits(srl),
-            
+
             Command::QueryAccount(qa) => self.handle_query_account(qa),
 
             Command::Cancel(c) => {
@@ -283,7 +290,10 @@ impl Engine {
         }
 
         // Risk check
-        if let Err(reason) = self.account_manager.check_risk(no.account_id, no.side, no.qty) {
+        if let Err(reason) = self
+            .account_manager
+            .check_risk(no.account_id, no.side, no.qty)
+        {
             evs.push(self.reject(no.client_seq, Some(no.order_id), reason));
             return evs;
         }
@@ -307,13 +317,19 @@ impl Engine {
             // Emit fills and update positions
             for f in fills.iter() {
                 self.metrics.inc_fills();
-                
+
                 // Update positions for taker (incoming order)
-                self.account_manager.apply_fill(no.account_id, no.side, f.price, f.qty);
-                
+                self.account_manager
+                    .apply_fill(no.account_id, no.side, f.price, f.qty);
+
                 // Update positions for maker (resting order) - opposite side
-                self.account_manager.apply_fill(f.maker_account_id, no.side.opposite(), f.price, f.qty);
-                
+                self.account_manager.apply_fill(
+                    f.maker_account_id,
+                    no.side.opposite(),
+                    f.price,
+                    f.qty,
+                );
+
                 evs.push(Event::Fill(Fill {
                     server_seq: self.next_seq(),
                     client_seq: no.client_seq,
@@ -372,7 +388,7 @@ impl Engine {
     fn handle_query_account(&mut self, qa: QueryAccount) -> Vec<Event> {
         let position = self.account_manager.get_position(qa.account_id);
         let risk_limits = self.account_manager.get_limits(qa.account_id);
-        
+
         vec![Event::AccountState(AccountState {
             server_seq: self.next_seq(),
             client_seq: qa.client_seq,

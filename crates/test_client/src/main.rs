@@ -1,4 +1,4 @@
-use bytes::{BufMut, BytesMut, Buf};
+use bytes::{Buf, BufMut, BytesMut};
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_util::codec::LengthDelimitedCodec;
@@ -13,7 +13,7 @@ const MT_ACK: u16 = 101;
 #[tokio::main]
 async fn main() {
     println!("=== Account State Update Test ===\n");
-    
+
     let stream = TcpStream::connect("127.0.0.1:9000").await.unwrap();
     let framed = LengthDelimitedCodec::builder()
         .little_endian()
@@ -25,32 +25,32 @@ async fn main() {
     println!("1. Querying initial account state...");
     send_query_account(&mut write_half, 1, 1, 1).await;
     read_and_display_account_state(&mut read_half).await;
-    
+
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    
+
     // Step 2: Place BUY order
     println!("\n2. Placing BUY order (1 @ 10000)...");
     send_order(&mut write_half, 10, 5001, 0, 10000, 1).await;
     drain_responses(&mut read_half, 1).await; // BookTop
-    
+
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    
+
     // Step 3: Place matching SELL order
     println!("\n3. Placing SELL order (1 @ 10000) - should fill...");
     send_order(&mut write_half, 11, 5002, 1, 10000, 1).await;
-    
+
     // Read fill events
     println!("   Waiting for fill events...");
     drain_responses(&mut read_half, 3).await; // Ack, Fill, BookTop
-    
+
     // Wait for account state to be updated
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    
+
     // Step 4: Query account state after fill
     println!("\n4. Querying account state after fill...");
     send_query_account(&mut write_half, 20, 1, 1).await;
     read_and_display_account_state(&mut read_half).await;
-    
+
     println!("\n=== Test Complete ===");
 }
 
@@ -76,7 +76,7 @@ async fn send_order(
     payload.put_i64_le(qty);
     payload.put_u8(0); // Gtc
     payload.put_u8(0); // not post_only
-    
+
     write_half.send(payload.freeze()).await.unwrap();
 }
 
@@ -94,7 +94,7 @@ async fn send_query_account(
     payload.put_u64_le(client_seq);
     payload.put_u32_le(account_id);
     payload.put_u32_le(symbol_id);
-    
+
     write_half.send(payload.freeze()).await.unwrap();
 }
 
@@ -112,17 +112,17 @@ async fn read_and_display_account_state(
                 let client_seq = b.get_u64_le();
                 let account_id = b.get_u32_le();
                 let symbol_id = b.get_u32_le();
-                
+
                 // Position
                 let net_position = b.get_i64_le();
                 let avg_price = b.get_i64_le();
                 let realized_pnl = b.get_i64_le();
-                
+
                 // Risk limits
                 let max_long = b.get_i64_le();
                 let max_short = b.get_i64_le();
                 let max_order_size = b.get_i64_le();
-                
+
                 println!("   Account State (client_seq={}):", client_seq);
                 println!("     Account ID: {}", account_id);
                 println!("     Symbol ID: {}", symbol_id);
@@ -135,7 +135,10 @@ async fn read_and_display_account_state(
                 println!("       Max Short: {}", max_short);
                 println!("       Max Order Size: {}", max_order_size);
             } else {
-                println!("   Got message type: {} (expected {})", mt, MT_ACCOUNT_STATE);
+                println!(
+                    "   Got message type: {} (expected {})",
+                    mt, MT_ACCOUNT_STATE
+                );
             }
         }
         _ => println!("   No response"),
@@ -149,10 +152,9 @@ async fn drain_responses(
     count: usize,
 ) {
     for _ in 0..count {
-        if let Ok(Some(Ok(frame))) = tokio::time::timeout(
-            tokio::time::Duration::from_secs(1),
-            read_half.next()
-        ).await {
+        if let Ok(Some(Ok(frame))) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(1), read_half.next()).await
+        {
             let mut b = frame.clone();
             let mt = b.get_u16_le();
             match mt {

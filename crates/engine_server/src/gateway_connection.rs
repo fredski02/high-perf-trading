@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use common::{GatewayToEngine, EngineToGateway, Metrics};
+use common::{EngineToGateway, GatewayToEngine, Metrics};
 use crossbeam_channel as cb;
 use engine::{Inbound, Outbound};
 use futures::{SinkExt, StreamExt};
@@ -26,7 +26,8 @@ pub async fn handle_gateway_connection(
     tracing::info!("Gateway connected for symbol_id={}", symbol_id);
 
     // Enable TCP_NODELAY to disable Nagle's algorithm (critical for low latency)
-    stream.set_nodelay(true)
+    stream
+        .set_nodelay(true)
         .context("Failed to set TCP_NODELAY")?;
 
     // Set larger socket buffers for better throughput
@@ -46,7 +47,6 @@ pub async fn handle_gateway_connection(
     let metrics_write = metrics.clone();
     let write_task = tokio::spawn(async move {
         while let Ok(outbound) = engine_out.recv() {
-
             // Wrap in EngineToGateway protocol
             let gateway_event = EngineToGateway::client_event(
                 outbound.conn_id,
@@ -69,27 +69,24 @@ pub async fn handle_gateway_connection(
             }
 
             metrics_write.inc_frames_out();
-            
+
             // Try to batch more events if available (non-blocking)
             while let Ok(outbound) = engine_out.try_recv() {
-                let gateway_event = EngineToGateway::client_event(
-                    outbound.conn_id,
-                    outbound.ev,
-                    None,
-                );
-                
+                let gateway_event =
+                    EngineToGateway::client_event(outbound.conn_id, outbound.ev, None);
+
                 let serialized = match postcard::to_allocvec(&gateway_event) {
                     Ok(bytes) => bytes,
                     Err(_) => continue,
                 };
-                
+
                 if write_half.feed(Bytes::from(serialized)).await.is_err() {
                     return;
                 }
-                
+
                 metrics_write.inc_frames_out();
             }
-            
+
             // Now flush once for the batch
             if write_half.flush().await.is_err() {
                 break;
@@ -114,7 +111,7 @@ async fn gateway_read_loop(
 ) -> Result<()> {
     while let Some(frame_result) = read_half.next().await {
         let frame = frame_result.context("read frame failed")?;
-        
+
         metrics.inc_frames_in();
 
         // Deserialize GatewayToEngine message
@@ -149,6 +146,6 @@ async fn gateway_read_loop(
             }
         }
     }
-    
+
     Ok(())
 }

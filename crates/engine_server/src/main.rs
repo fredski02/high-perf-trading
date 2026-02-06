@@ -21,8 +21,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    
-    info!("Starting engine server for {} (symbol_id={})", args.symbol_name, args.symbol_id);
+
+    info!(
+        "Starting engine server for {} (symbol_id={})",
+        args.symbol_name, args.symbol_id
+    );
     info!("  Gateway listen addr: {}", args.listen_addr);
     info!("  Admin HTTP addr: {}", args.admin_addr);
     info!("  Journal path: {}", args.get_journal_path());

@@ -3,11 +3,11 @@ mod client_handler;
 mod config;
 mod engine_router;
 
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use std::collections::HashMap;
 
 use clap::Parser;
 use codecs::{BinaryCodec, JsonCodec};
@@ -19,8 +19,10 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use account_manager::AccountManager;
+use client_handler::{
+    handle_client_connection, handle_engine_responses, ClientInfo, GatewayContext,
+};
 use engine_router::{EngineRouter, EnginesConfig};
-use client_handler::{GatewayContext, ClientInfo, handle_client_connection, handle_engine_responses};
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -31,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    
+
     tracing::info!("Starting gateway server...");
     tracing::info!("  Client binary addr: {}", args.client_binary_addr);
     tracing::info!("  Client JSON addr: {}", args.client_json_addr);
@@ -44,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize account manager
     let account_manager = Arc::new(AccountManager::new());
-    
+
     // TODO: Load accounts from snapshot/journal
     // For now, create test accounts
     for account_id in 1..=10 {
@@ -54,14 +56,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Load engine configuration and connect
     let engines_config = EnginesConfig::from_file(&args.engines_config)?;
-    tracing::info!("Loaded {} engine(s) from {}", engines_config.engines.len(), args.engines_config);
-    
+    tracing::info!(
+        "Loaded {} engine(s) from {}",
+        engines_config.engines.len(),
+        args.engines_config
+    );
+
     for engine in &engines_config.engines {
-        tracing::info!("  - {} (symbol_id={}) at {}", engine.symbol_name, engine.symbol_id, engine.address);
+        tracing::info!(
+            "  - {} (symbol_id={}) at {}",
+            engine.symbol_name,
+            engine.symbol_id,
+            engine.address
+        );
     }
 
     let engine_router = Arc::new(EngineRouter::new(engines_config.engines).await?);
-    tracing::info!("Connected to {} engine(s)", engine_router.num_connections().await);
+    tracing::info!(
+        "Connected to {} engine(s)",
+        engine_router.num_connections().await
+    );
 
     // Create gateway context
     let ctx = Arc::new(GatewayContext {
@@ -72,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Client senders registry (conn_id -> ClientInfo with codec)
-    let client_senders: Arc<RwLock<HashMap<u64, ClientInfo>>> = 
+    let client_senders: Arc<RwLock<HashMap<u64, ClientInfo>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
     // Spawn admin server (TODO: implement)
@@ -152,15 +166,9 @@ async fn run_listener(
         let client_senders = client_senders.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client_connection(
-                stream,
-                conn_id,
-                codec,
-                ctx,
-                max_frame,
-                client_senders,
-            )
-            .await
+            if let Err(e) =
+                handle_client_connection(stream, conn_id, codec, ctx, max_frame, client_senders)
+                    .await
             {
                 tracing::debug!("client connection {conn_id} error: {e:#}");
             }

@@ -6,12 +6,12 @@
 //! - Risk limits
 //! - Tentative reservations to prevent race conditions
 
-use std::collections::HashMap;
-use dashmap::DashMap;
 use common::{
-    Command, Event, NewOrder, Side, RiskLimits as CommonRiskLimits,
-    Position as CommonPosition, AccountId, SymbolId,
+    AccountId, Command, Event, NewOrder, Position as CommonPosition,
+    RiskLimits as CommonRiskLimits, Side, SymbolId,
 };
+use dashmap::DashMap;
+use std::collections::HashMap;
 
 /// Account state for a single account
 #[derive(Debug, Clone)]
@@ -171,7 +171,7 @@ impl AccountManager {
     }
 
     /// Apply a fill from the engine, releasing tentative reservation and updating actual position
-    /// 
+    ///
     /// Note: The gateway must track which account_id corresponds to which order_id,
     /// since Fill events don't include account_id (only order_ids)
     pub fn apply_fill(&self, event: &Event, token: &ReservationToken, is_buy: bool) {
@@ -263,7 +263,7 @@ impl Default for AccountManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{TimeInForce, OrderFlags};
+    use common::{OrderFlags, TimeInForce};
 
     fn make_test_order(
         account_id: AccountId,
@@ -346,9 +346,7 @@ mod tests {
         mgr.create_account(100, 100000);
 
         let order = make_test_order(100, 1, Side::Buy, 50000, 1);
-        let token = mgr
-            .check_and_reserve(&Command::NewOrder(order))
-            .unwrap();
+        let token = mgr.check_and_reserve(&Command::NewOrder(order)).unwrap();
 
         // Release the reservation
         mgr.release_reservation(&token);

@@ -3,15 +3,15 @@
 //! This module defines the protocol between the gateway server and engine servers.
 //! The gateway wraps client commands with risk approval metadata before forwarding to engines.
 
+use crate::{AccountId, Command, Event, OrderId, SymbolId};
 use serde::{Deserialize, Serialize};
-use crate::{Command, Event, OrderId, AccountId, SymbolId};
 
 /// Commands sent from gateway to engine (risk-approved orders)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GatewayToEngine {
     /// Execute a command (already risk-approved by gateway)
     Execute(ExecuteCommand),
-    
+
     /// Health check / ping
     Ping,
 }
@@ -21,10 +21,10 @@ pub enum GatewayToEngine {
 pub struct ExecuteCommand {
     /// The original command from the client
     pub command: Command,
-    
+
     /// Connection ID for routing responses back to client
     pub conn_id: u64,
-    
+
     /// Risk approval token (proves gateway checked risk)
     pub risk_token: RiskToken,
 }
@@ -34,10 +34,10 @@ pub struct ExecuteCommand {
 pub struct RiskToken {
     /// Account ID (for verification)
     pub account_id: AccountId,
-    
+
     /// Amount of buying power reserved for this order
     pub reserved_amount: i64,
-    
+
     /// Sequence number from gateway (for idempotency)
     pub gateway_seq: u64,
 }
@@ -49,25 +49,22 @@ pub enum EngineToGateway {
     ClientEvent {
         /// Connection ID to route to
         conn_id: u64,
-        
+
         /// The event (Fill, Ack, Reject, etc.)
         event: Event,
-        
+
         /// Risk token (for releasing reservations)
         risk_token: Option<RiskToken>,
     },
-    
+
     /// Engine health status
     Pong {
         symbol_id: SymbolId,
         orders_in_book: usize,
     },
-    
+
     /// Market data broadcast (BookTop, Trade)
-    MarketData {
-        symbol_id: SymbolId,
-        event: Event,
-    },
+    MarketData { symbol_id: SymbolId, event: Event },
 }
 
 impl GatewayToEngine {

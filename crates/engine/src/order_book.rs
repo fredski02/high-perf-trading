@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use slab::Slab;
 use serde::{Deserialize, Serialize};
+use slab::Slab;
 
 use common::{AccountId, OrderFlags, OrderId, Price, Qty, Side, SymbolId, TimeInForce};
 
@@ -339,7 +339,8 @@ impl OrderBook {
     /// Serialize order book state to bytes for snapshotting
     pub fn serialize_snapshot(&self) -> anyhow::Result<Vec<u8>> {
         // Collect all live orders
-        let live_orders: Vec<Order> = self.orders
+        let live_orders: Vec<Order> = self
+            .orders
             .iter()
             .filter(|(_, o)| o.qty_rem > 0)
             .map(|(_, o)| o.clone())

@@ -5,18 +5,18 @@
 //! - Receiving events (fills, acks, rejects) from engines
 //! - Connection health monitoring
 
+use anyhow::{Context, Result};
+use bytes::Bytes;
+use futures::{stream::SplitSink, stream::SplitStream, SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use anyhow::{Result, Context};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use futures::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 
-use common::{SymbolId, GatewayToEngine, EngineToGateway};
+use common::{EngineToGateway, GatewayToEngine, SymbolId};
 
 /// Configuration for a single engine (loaded from TOML)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,10 +50,10 @@ type EngineSink = SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>;
 pub struct EngineRouter {
     /// Write halves of connections to engines (for sending commands)
     senders: Arc<Mutex<HashMap<SymbolId, EngineSink>>>,
-    
+
     /// Channel to receive events from all engines
     event_rx: Arc<Mutex<mpsc::UnboundedReceiver<EngineToGateway>>>,
-    
+
     /// Sender side of event channel (cloned for each engine listener)
     event_tx: mpsc::UnboundedSender<EngineToGateway>,
 }
@@ -79,7 +79,9 @@ impl EngineRouter {
 
     /// Connect to a single engine and start listening for events
     async fn connect_to_engine(&self, config: &EngineConfig) -> Result<()> {
-        let addr = config.address.parse::<SocketAddr>()
+        let addr = config
+            .address
+            .parse::<SocketAddr>()
             .with_context(|| format!("Invalid address: {}", config.address))?;
 
         let stream = TcpStream::connect(addr)
@@ -87,7 +89,8 @@ impl EngineRouter {
             .with_context(|| format!("Failed to connect to engine at {}", addr))?;
 
         // Enable TCP_NODELAY to disable Nagle's algorithm (critical for low latency)
-        stream.set_nodelay(true)
+        stream
+            .set_nodelay(true)
             .context("Failed to set TCP_NODELAY")?;
 
         // Set larger socket buffers for better throughput
@@ -129,22 +132,22 @@ impl EngineRouter {
 
     /// Route a command to the appropriate engine server
     pub async fn route_to_engine(&self, msg: &GatewayToEngine, symbol_id: SymbolId) -> Result<()> {
-        let serialized = postcard::to_allocvec(msg)
-            .context("Failed to serialize GatewayToEngine")?;
-        
+        let serialized =
+            postcard::to_allocvec(msg).context("Failed to serialize GatewayToEngine")?;
+
         let mut senders = self.senders.lock().await;
-        
-        let sender = senders.get_mut(&symbol_id)
+
+        let sender = senders
+            .get_mut(&symbol_id)
             .with_context(|| format!("No engine configured for symbol_id={}", symbol_id))?;
 
         // Use feed() + flush() instead of send() for better batching
-        sender.feed(Bytes::from(serialized))
+        sender
+            .feed(Bytes::from(serialized))
             .await
             .context("Failed to feed to engine")?;
-        
-        sender.flush()
-            .await
-            .context("Failed to flush to engine")?;
+
+        sender.flush().await.context("Failed to flush to engine")?;
 
         Ok(())
     }
@@ -169,19 +172,21 @@ async fn engine_reader_task(
 ) {
     loop {
         match read_half.next().await {
-            Some(Ok(bytes)) => {
-                match postcard::from_bytes::<EngineToGateway>(&bytes) {
-                    Ok(event) => {
-                        if event_tx.send(event).is_err() {
-                            tracing::warn!("Event channel closed for symbol_id={}", symbol_id);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to deserialize EngineToGateway for symbol_id={}: {}", symbol_id, e);
+            Some(Ok(bytes)) => match postcard::from_bytes::<EngineToGateway>(&bytes) {
+                Ok(event) => {
+                    if event_tx.send(event).is_err() {
+                        tracing::warn!("Event channel closed for symbol_id={}", symbol_id);
+                        break;
                     }
                 }
-            }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to deserialize EngineToGateway for symbol_id={}: {}",
+                        symbol_id,
+                        e
+                    );
+                }
+            },
             Some(Err(e)) => {
                 tracing::error!("Error receiving from engine symbol_id={}: {}", symbol_id, e);
                 break;
