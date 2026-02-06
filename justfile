@@ -10,10 +10,6 @@ default:
 build:
   cargo build --release
 
-# Watch and auto-rebuild with bacon
-watch:
-  bacon
-
 # ==================== Testing ====================
 
 # Run all workspace tests
