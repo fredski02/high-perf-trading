@@ -263,11 +263,14 @@ clean:
 clean-all: clean clean-persistence
   @echo "Everything cleaned"
 
-# Kill any running engine_server/bench processes
+# Kill all running servers (gateway, engines, bench processes)
 kill:
-  @echo "Killing server and bench processes..."
+  @echo "Killing all server processes..."
+  @pkill -9 gateway_server 2>/dev/null && echo "✓ Killed gateway_server" || echo "No gateway_server running"
   @pkill -9 engine_server 2>/dev/null && echo "✓ Killed engine_server" || echo "No engine_server running"
   @pkill -9 bench 2>/dev/null && echo "✓ Killed bench" || echo "No bench running"
+  @pkill -9 test_client 2>/dev/null && echo "✓ Killed test_client" || echo "No test_client running"
+  @echo "All processes killed"
 
 # ==================== Documentation ====================
 
