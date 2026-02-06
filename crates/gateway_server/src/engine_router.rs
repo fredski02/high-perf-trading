@@ -86,6 +86,16 @@ impl EngineRouter {
             .await
             .with_context(|| format!("Failed to connect to engine at {}", addr))?;
 
+        // Enable TCP_NODELAY to disable Nagle's algorithm (critical for low latency)
+        stream.set_nodelay(true)
+            .context("Failed to set TCP_NODELAY")?;
+
+        // Set larger socket buffers for better throughput
+        // Note: Tokio doesn't expose buffer size methods directly, would need socket2 crate
+        // Leaving commented for future optimization if needed
+        // let _ = stream.set_recv_buffer_size(256 * 1024);
+        // let _ = stream.set_send_buffer_size(256 * 1024);
+
         let framed = LengthDelimitedCodec::builder()
             .little_endian()
             .max_frame_length(10 * 1024 * 1024) // 10MB max frame
@@ -127,9 +137,14 @@ impl EngineRouter {
         let sender = senders.get_mut(&symbol_id)
             .with_context(|| format!("No engine configured for symbol_id={}", symbol_id))?;
 
-        sender.send(Bytes::from(serialized))
+        // Use feed() + flush() instead of send() for better batching
+        sender.feed(Bytes::from(serialized))
             .await
-            .context("Failed to send to engine")?;
+            .context("Failed to feed to engine")?;
+        
+        sender.flush()
+            .await
+            .context("Failed to flush to engine")?;
 
         Ok(())
     }

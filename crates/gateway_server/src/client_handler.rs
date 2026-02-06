@@ -58,6 +58,15 @@ pub async fn handle_client_connection(
 ) -> Result<()> {
     ctx.metrics.inc_connections();
 
+    // Enable TCP_NODELAY to disable Nagle's algorithm (critical for low latency)
+    stream.set_nodelay(true)
+        .context("Failed to set TCP_NODELAY")?;
+
+    // Set larger socket buffers for better throughput
+    // Note: Would need socket2 crate for buffer tuning, skipping for now
+    // let _ = stream.set_recv_buffer_size(256 * 1024);
+    // let _ = stream.set_send_buffer_size(256 * 1024);
+
     // Create length-delimited framed stream
     let framed = LengthDelimitedCodec::builder()
         .little_endian()
@@ -82,7 +91,20 @@ pub async fn handle_client_connection(
     // Spawn write loop
     let write_task = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
-            if write_half.send(frame).await.is_err() {
+            // Use feed() instead of send() to avoid auto-flush
+            if write_half.feed(frame).await.is_err() {
+                break;
+            }
+            
+            // Try to batch more frames if available (non-blocking)
+            while let Ok(frame) = out_rx.try_recv() {
+                if write_half.feed(frame).await.is_err() {
+                    return;
+                }
+            }
+            
+            // Now flush once for the batch
+            if write_half.flush().await.is_err() {
                 break;
             }
         }
