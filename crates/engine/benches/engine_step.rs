@@ -36,7 +36,7 @@ fn bench_engine_process(c: &mut Criterion) {
     });
     c.bench_function("engine_process_ack", |b| {
         b.iter_batched(
-            || cmd,                                           // setup (not timed)
+            || cmd.clone(),                                   // setup (not timed)
             |cmd_i| black_box(eng.process(black_box(cmd_i))), // timed
             BatchSize::SmallInput,
         )
