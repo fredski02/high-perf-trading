@@ -113,7 +113,7 @@ impl Engine {
             );
 
             for cmd in replay_cmds {
-                self.replay_command(*cmd);
+                self.replay_command(cmd.clone());
             }
         }
 
@@ -216,6 +216,13 @@ impl Engine {
             Command::SetRiskLimits(srl) => self.handle_set_risk_limits(srl),
 
             Command::QueryAccount(qa) => self.handle_query_account(qa),
+
+            Command::Authenticate(_) => {
+                // Authenticate commands should never reach the engine
+                // They are handled by the gateway before routing
+                // Return empty vec (no events)
+                Vec::new()
+            }
 
             Command::Cancel(c) => {
                 let mut evs = Vec::new();
@@ -477,6 +484,10 @@ impl Engine {
             }
             Command::QueryAccount(qa) => {
                 let _ = self.handle_query_account(qa);
+            }
+            Command::Authenticate(_) => {
+                // Authenticate commands should never be in journal (handled by gateway)
+                // Ignore during replay
             }
         }
         self.command_seq += 1;

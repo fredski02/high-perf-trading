@@ -45,24 +45,27 @@ Goal: Production-ready matching engine similar to real exchanges (Coinbase, Bina
 
 ## Workspace Crates
 
-### `gateway_server` (NEW - TO BE IMPLEMENTED)
-**Global Account & Risk Management**
+### `gateway_server` ✅ IMPLEMENTED
+**Global Account & Risk Management + Authentication**
 
 Responsibilities:
+- **Authentication**: API key verification and session management
 - Maintain all account state in-memory (positions, buying power, risk limits)
 - Handle client connections (binary + JSON protocols)
 - Pre-flight risk checks with tentative reservations
 - Route approved orders to correct engine server by symbol_id
 - Receive fills from engines and update account state
 - Persistence: journaling + snapshots (same strategy as engine)
-- Admin HTTP API for monitoring, metrics, account queries
+- Admin HTTP API for monitoring, metrics, account queries (TODO)
 
 Key Components:
-- `AccountManager` - In-memory account state with per-account locks
-- `RiskChecker` - Pre-flight risk with tentative reservations
-- `EngineRouter` - Maintains persistent TCP connections to all engines
-- `ClientHandler` - Handles client connections (reuse current server code)
-- `Journal` - Account update persistence (deposits, fills, limits)
+- `AuthService` ✅ - API key → account_id mapping with verification
+- `SessionManager` ✅ - Track authenticated connections (conn_id → account_id)
+- `AccountManager` ✅ - In-memory account state with per-account locks
+- `RiskChecker` (in AccountManager) ✅ - Pre-flight risk with tentative reservations
+- `EngineRouter` ✅ - Maintains persistent TCP connections to all engines
+- `ClientHandler` ✅ - Handles client connections with auth enforcement
+- `Journal` (TODO) - Account update persistence (deposits, fills, limits)
 
 ### `engine_server` (RENAMED FROM `server`)
 **Pure Order Book Matching**
@@ -398,6 +401,132 @@ enum EngineToGateway {
 - RiskToken returned with events so gateway can release reservations
 - Ping/Pong for health monitoring
 - Market data events separate from client events
+
+---
+
+## Authentication & Session Management ✅ IMPLEMENTED
+
+### Overview
+
+The gateway implements a secure authentication system where clients must authenticate with a valid API key before placing orders. This prevents unauthorized trading and enables proper account attribution.
+
+### Authentication Flow
+
+```
+Client                    Gateway                     
+  |                          |
+  |--- Authenticate(api_key)--|
+  |                          | 
+  |                          |--[Verify API key]
+  |                          |--[Lookup account_id]
+  |                          |
+  |<-- AuthSuccess(account_id)|  (if valid)
+  |    or AuthFailure(reason)--<  (if invalid)
+  |                          |
+  |                          |--[Register session: conn_id → account_id]
+  |                          |
+  |--- NewOrder(...) ---------|  (now allowed)
+  |                          |
+```
+
+### Components
+
+#### AuthService (`auth.rs`)
+- **Purpose**: Verify API keys and map them to account IDs
+- **Storage**: In-memory HashMap (production: database)
+- **Methods**:
+  - `authenticate(api_key)` → `Result<AccountId>` - Verify key and return account
+  - `register_api_key(api_key, account_id)` - Admin operation to add keys
+  - `revoke_api_key(api_key)` - Admin operation to remove keys
+  - `has_api_key(api_key)` → `bool` - Check if key exists
+
+#### SessionManager (`session.rs`)
+- **Purpose**: Track which connections are authenticated
+- **Storage**: HashMap<conn_id, account_id>
+- **Methods**:
+  - `register(conn_id, account_id)` - Create session on successful auth
+  - `get_account_id(conn_id)` → `Option<AccountId>` - Get account for connection
+  - `is_authenticated(conn_id)` → `bool` - Check if connection is authenticated
+  - `unregister(conn_id)` - Clean up session on disconnect
+
+#### Security Enforcement
+- **Pre-auth**: Only `Command::Authenticate` and `Command::QueryAccount` allowed
+- **Post-auth**: All commands (NewOrder, Cancel, Replace, etc.) allowed
+- **Unauthenticated orders**: Immediately rejected with `RejectReason::Invalid`
+- **Disconnect cleanup**: Sessions automatically unregistered
+
+### Protocol Types
+
+```rust
+// Client → Gateway
+Command::Authenticate {
+    api_key: String  // User's API key (e.g., "test-key-1")
+}
+
+// Gateway → Client
+Event::AuthSuccess {
+    account_id: AccountId  // Account ID assigned to this session
+}
+
+Event::AuthFailure {
+    reason: String  // Error message (e.g., "Invalid API key")
+}
+```
+
+### Test Accounts (Development)
+
+For development and testing, the gateway creates 10 test accounts on startup:
+
+- **Account IDs**: 1-10
+- **API Keys**: "test-key-1" through "test-key-10"
+- **Buying Power**: $1,000,000 each
+- **Usage**: `auth_test` binary validates all authentication paths
+
+### Production Considerations (TODO)
+
+**Current Implementation**:
+- ✅ In-memory API key storage (HashMap)
+- ✅ Session tracking per connection
+- ✅ Security enforcement (no orders without auth)
+- ✅ Clean session cleanup on disconnect
+- ✅ Comprehensive test coverage
+
+**Production Enhancements**:
+- 🚧 Database-backed authentication (PostgreSQL/Redis)
+- 🚧 JWT tokens with expiration and refresh
+- 🚧 Rate limiting on authentication attempts
+- 🚧 Session timeout (idle disconnect after N minutes)
+- 🚧 Max sessions per account limit
+- 🚧 Audit logging (login attempts, failures, IP tracking)
+- 🚧 Admin API for key management (create/revoke/list)
+- 🚧 2FA support for high-value accounts
+- 🚧 API key permissions (read-only, trade-only, admin)
+
+### Testing
+
+**End-to-End Test** (`auth_test` binary):
+1. ✅ Valid API key authentication
+2. ✅ Invalid API key rejection
+3. ✅ Unauthenticated order rejection
+4. ✅ Authenticated order acceptance
+
+**Run Tests**:
+```bash
+# Start gateway + engines
+./scripts/start_engines.sh
+./scripts/start_gateway.sh
+
+# Run authentication test
+cargo run --release --bin auth_test
+```
+
+**Expected Output**:
+```
+✓ Successfully authenticated as account_id=1
+✓ Order accepted (Ack received)
+✓ Authentication rejected as expected
+✓ Order rejected as expected (not authenticated)
+```
 
 ---
 
@@ -1159,13 +1288,32 @@ System is ready for production deployment after AWS testing.
 - ✅ LengthDelimitedCodec for framing
 - ✅ Prometheus metrics
 
-### Gateway (TO BE IMPLEMENTED)
-- ⏳ Account state management
-- ⏳ Tentative reservations
-- ⏳ Risk pre-flight checks
-- ⏳ Order routing to engines
-- ⏳ Fill aggregation
-- ⏳ Gateway persistence
+### Gateway ✅ IMPLEMENTED
+- ✅ **Authentication & Session Management**
+  - API key verification (AuthService)
+  - Session tracking (SessionManager)
+  - Security enforcement (reject unauthenticated orders)
+  - Test coverage (auth_test binary)
+- ✅ **Account State Management**
+  - In-memory account state with per-account locking
+  - Positions tracking (net_position, avg_price, realized_pnl)
+  - Buying power management
+- ✅ **Risk Management**
+  - Tentative reservations (prevent double-spend)
+  - Pre-flight risk checks
+  - Position limit enforcement
+  - Order size validation
+- ✅ **Order Routing**
+  - Persistent TCP connections to engines
+  - Symbol-based routing (symbol_id → engine)
+  - Fill event aggregation
+  - Client response routing
+- ✅ **Client Connection Handling**
+  - Binary and JSON protocol support
+  - Length-delimited framing
+  - TCP_NODELAY for low latency
+  - Batched writes (feed/flush pattern)
+- ⏳ Gateway persistence (journaling + snapshots) - TODO
 
 ---
 

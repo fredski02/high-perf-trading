@@ -95,24 +95,28 @@ impl EngineToGateway {
 }
 
 /// Helper to extract symbol_id from a command
-pub fn command_symbol_id(cmd: &Command) -> SymbolId {
+/// Returns None for Authenticate command (not routed to engines)
+pub fn command_symbol_id(cmd: &Command) -> Option<SymbolId> {
     match cmd {
-        Command::NewOrder(o) => o.symbol_id,
-        Command::Cancel(c) => c.symbol_id,
-        Command::Replace(r) => r.symbol_id,
-        Command::SetRiskLimits(s) => s.symbol_id,
-        Command::QueryAccount(q) => q.symbol_id,
+        Command::NewOrder(o) => Some(o.symbol_id),
+        Command::Cancel(c) => Some(c.symbol_id),
+        Command::Replace(r) => Some(r.symbol_id),
+        Command::SetRiskLimits(s) => Some(s.symbol_id),
+        Command::QueryAccount(q) => Some(q.symbol_id),
+        Command::Authenticate(_) => None,  // Auth doesn't have symbol_id
     }
 }
 
 /// Helper to extract account_id from a command
-pub fn command_account_id(cmd: &Command) -> AccountId {
+/// Returns None for Authenticate command (account_id determined after auth)
+pub fn command_account_id(cmd: &Command) -> Option<AccountId> {
     match cmd {
-        Command::NewOrder(o) => o.account_id,
-        Command::Cancel(c) => c.account_id,
-        Command::Replace(r) => r.account_id,
-        Command::SetRiskLimits(s) => s.account_id,
-        Command::QueryAccount(q) => q.account_id,
+        Command::NewOrder(o) => Some(o.account_id),
+        Command::Cancel(c) => Some(c.account_id),
+        Command::Replace(r) => Some(r.account_id),
+        Command::SetRiskLimits(s) => Some(s.account_id),
+        Command::QueryAccount(q) => Some(q.account_id),
+        Command::Authenticate(_) => None,  // Auth doesn't have account_id yet
     }
 }
 
@@ -122,6 +126,6 @@ pub fn command_order_id(cmd: &Command) -> Option<OrderId> {
         Command::NewOrder(o) => Some(o.order_id),
         Command::Cancel(c) => Some(c.order_id),
         Command::Replace(r) => Some(r.order_id),
-        Command::SetRiskLimits(_) | Command::QueryAccount(_) => None,
+        Command::SetRiskLimits(_) | Command::QueryAccount(_) | Command::Authenticate(_) => None,
     }
 }

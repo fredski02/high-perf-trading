@@ -239,6 +239,7 @@ impl AccountManager {
             Command::Replace(r) => r.account_id,
             Command::SetRiskLimits(s) => s.account_id,
             Command::QueryAccount(q) => q.account_id,
+            Command::Authenticate(_) => 0, // Auth doesn't have account_id yet
         }
     }
 
@@ -250,6 +251,7 @@ impl AccountManager {
             Command::Replace(r) => r.symbol_id,
             Command::SetRiskLimits(s) => s.symbol_id,
             Command::QueryAccount(q) => q.symbol_id,
+            Command::Authenticate(_) => 0, // Auth doesn't have symbol_id
         }
     }
 }

@@ -8,12 +8,15 @@ const MT_CANCEL: u16 = 2;
 const MT_REPLACE: u16 = 3;
 const MT_SET_RISK_LIMITS: u16 = 4;
 const MT_QUERY_ACCOUNT: u16 = 5;
+const MT_AUTHENTICATE: u16 = 6;
 
 const MT_ACK: u16 = 101;
 const MT_REJECT: u16 = 102;
 const MT_FILL: u16 = 103;
 const MT_BOOK_TOP: u16 = 104;
 const MT_ACCOUNT_STATE: u16 = 105;
+const MT_AUTH_SUCCESS: u16 = 106;
+const MT_AUTH_FAILURE: u16 = 107;
 
 #[derive(Clone, Default)]
 pub struct BinaryCodec;
@@ -41,6 +44,7 @@ impl Codec for BinaryCodec {
                     common::RejectReason::Overloaded => 3,
                     common::RejectReason::NotFound => 4,
                     common::RejectReason::PostOnlyWouldCross => 5,
+                    common::RejectReason::RateLimitExceeded => 6,
                 });
                 match r.order_id {
                     Some(id) => {
@@ -85,6 +89,14 @@ impl Codec for BinaryCodec {
                 out.put_i64_le(a.risk_limits.max_long_position);
                 out.put_i64_le(a.risk_limits.max_short_position);
                 out.put_i64_le(a.risk_limits.max_order_size);
+            }
+            Event::AuthSuccess(a) => {
+                out.put_u16_le(MT_AUTH_SUCCESS);
+                out.put_u32_le(a.account_id);
+            }
+            Event::AuthFailure(a) => {
+                out.put_u16_le(MT_AUTH_FAILURE);
+                put_string(out, &a.reason);
             }
         }
         Ok(())
@@ -188,6 +200,12 @@ impl Codec for BinaryCodec {
                     symbol_id,
                 }))
             }
+            MT_AUTHENTICATE => {
+                let api_key = get_string(&mut b)?;
+                Ok(Command::Authenticate(common::Authenticate {
+                    api_key,
+                }))
+            }
             _ => Err(ProtoError::Malformed("binary: unknown msg_type")),
         }
     }
@@ -224,4 +242,23 @@ fn get_i64(b: &mut Bytes) -> Result<i64, ProtoError> {
         return Err(ProtoError::Malformed("binary: underrun"));
     }
     Ok(b.get_i64_le())
+}
+
+fn put_string(out: &mut BytesMut, s: &str) {
+    let bytes = s.as_bytes();
+    out.put_u32_le(bytes.len() as u32);
+    out.put_slice(bytes);
+}
+
+fn get_string(b: &mut Bytes) -> Result<String, ProtoError> {
+    if b.remaining() < 4 {
+        return Err(ProtoError::Malformed("binary: underrun"));
+    }
+    let len = b.get_u32_le() as usize;
+    if b.remaining() < len {
+        return Err(ProtoError::Malformed("binary: underrun"));
+    }
+    let bytes = b.copy_to_bytes(len);
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| ProtoError::Malformed("binary: invalid utf8"))
 }

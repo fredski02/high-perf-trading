@@ -87,7 +87,7 @@ impl Journal {
     /// Append a command (buffered, may not be durable immediately)
     #[inline]
     pub fn append(&mut self, cmd: &Command) -> anyhow::Result<()> {
-        self.batch_buffer.push(*cmd);
+        self.batch_buffer.push(cmd.clone());
 
         let should_flush = self.batch_buffer.len() >= self.batch_size
             || self.last_sync.elapsed() >= self.sync_interval;

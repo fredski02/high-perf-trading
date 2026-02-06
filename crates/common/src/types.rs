@@ -68,13 +68,19 @@ pub struct OrderFlags {
     pub post_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     NewOrder(NewOrder),
     Cancel(Cancel),
     Replace(Replace),
     SetRiskLimits(SetRiskLimits),
     QueryAccount(QueryAccount),
+    Authenticate(Authenticate),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Authenticate {
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
@@ -130,6 +136,18 @@ pub enum Event {
     Fill(Fill),
     BookTop(BookTop),
     AccountState(AccountState),
+    AuthSuccess(AuthSuccess),
+    AuthFailure(AuthFailure),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthSuccess {
+    pub account_id: AccountId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthFailure {
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +172,7 @@ pub enum RejectReason {
     Overloaded,
     NotFound,
     PostOnlyWouldCross,
+    RateLimitExceeded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

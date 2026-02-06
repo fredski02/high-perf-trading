@@ -22,7 +22,7 @@ use tokio::{
     sync::{mpsc, RwLock},
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::account_manager::{AccountManager, ReservationToken};
 use crate::engine_router::EngineRouter;
@@ -47,6 +47,8 @@ pub struct ClientInfo {
 pub struct GatewayContext {
     pub account_manager: Arc<AccountManager>,
     pub engine_router: Arc<EngineRouter>,
+    pub auth_service: Arc<crate::auth::AuthService>,
+    pub session_manager: Arc<crate::session::SessionManager>,
     pub metrics: Arc<Metrics>,
     /// Global order tracking: order_id -> metadata
     pub pending_orders: Arc<RwLock<HashMap<OrderId, OrderMetadata>>>,
@@ -117,13 +119,21 @@ pub async fn handle_client_connection(
     });
 
     // Run read loop (blocks until connection closes)
-    let read_result = client_read_loop(&mut read_half, conn_id, codec, out_tx, ctx).await;
+    let read_result = client_read_loop(&mut read_half, conn_id, codec, out_tx, ctx.clone()).await;
 
-    // Cleanup: remove from registry and abort write task
+    // Cleanup: remove from registry, unregister session, and abort write task
     {
         let mut senders = client_senders.write().await;
         senders.remove(&conn_id);
     }
+    
+    // Unregister session if client was authenticated
+    if let Some(account_id) = ctx.session_manager.unregister(conn_id).await {
+        info!("Client disconnected: conn_id={}, account_id={}", conn_id, account_id);
+    } else {
+        info!("Client disconnected: conn_id={} (was not authenticated)", conn_id);
+    }
+    
     write_task.abort();
 
     read_result
@@ -205,8 +215,57 @@ async fn client_read_loop(
             continue;
         }
 
-        // Extract info we'll need
-        let symbol_id = command_symbol_id(&cmd);
+        // Handle Authenticate directly (no need to route to engine)
+        if let Command::Authenticate(auth) = &cmd {
+            // Verify API key and get account ID
+            let auth_result = ctx.auth_service.authenticate(&auth.api_key).await;
+
+            let event = match auth_result {
+                Ok(account_id) => {
+                    // Register the session
+                    ctx.session_manager.register(conn_id, account_id).await;
+                    info!("Client authenticated: conn_id={}, account_id={}", conn_id, account_id);
+                    Event::AuthSuccess(common::AuthSuccess { account_id })
+                }
+                Err(err) => {
+                    warn!("Authentication failed: conn_id={}, error={}", conn_id, err);
+                    Event::AuthFailure(common::AuthFailure {
+                        reason: format!("Authentication failed: {}", err),
+                    })
+                }
+            };
+
+            let mut response_payload = bytes::BytesMut::with_capacity(256);
+            if codec.encode_event(&event, &mut response_payload).is_ok() {
+                let _ = out_tx.send(response_payload.freeze()).await;
+                ctx.metrics.inc_frames_out();
+            }
+
+            continue;
+        }
+
+        // All other commands require authentication
+        if !ctx.session_manager.is_authenticated(conn_id).await {
+            warn!("Unauthenticated command rejected: conn_id={}", conn_id);
+            
+            let reject = Event::Reject(common::Reject {
+                server_seq: ctx.account_manager.next_seq(),
+                client_seq: 0, // Don't know client_seq for unauthenticated commands
+                order_id: None,
+                reason: common::RejectReason::Invalid,
+            });
+
+            let mut reject_payload = bytes::BytesMut::with_capacity(256);
+            if codec.encode_event(&reject, &mut reject_payload).is_ok() {
+                let _ = out_tx.send(reject_payload.freeze()).await;
+                ctx.metrics.inc_frames_out();
+            }
+
+            continue;
+        }
+
+        // Extract info we'll need (safe to unwrap since Authenticate was handled above)
+        let symbol_id = command_symbol_id(&cmd).expect("command should have symbol_id");
         let is_buy = if let Command::NewOrder(order) = &cmd {
             order.side == common::Side::Buy
         } else {
@@ -271,7 +330,7 @@ async fn client_read_loop(
             gateway_seq,
         };
 
-        let gateway_msg = GatewayToEngine::execute(cmd, conn_id, risk_token);
+        let gateway_msg = GatewayToEngine::execute(cmd.clone(), conn_id, risk_token);
 
         // Route to engine
         if let Err(e) = ctx

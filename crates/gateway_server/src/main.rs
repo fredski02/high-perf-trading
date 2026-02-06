@@ -1,7 +1,9 @@
 mod account_manager;
+mod auth;
 mod client_handler;
 mod config;
 mod engine_router;
+mod session;
 
 use std::collections::HashMap;
 use std::sync::{
@@ -19,10 +21,12 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use account_manager::AccountManager;
+use auth::AuthService;
 use client_handler::{
     handle_client_connection, handle_engine_responses, ClientInfo, GatewayContext,
 };
 use engine_router::{EngineRouter, EnginesConfig};
+use session::SessionManager;
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -47,12 +51,23 @@ async fn main() -> anyhow::Result<()> {
     // Initialize account manager
     let account_manager = Arc::new(AccountManager::new());
 
+    // Initialize authentication service
+    let auth_service = Arc::new(AuthService::new());
+
+    // Initialize session manager
+    let session_manager = Arc::new(SessionManager::new());
+
     // TODO: Load accounts from snapshot/journal
-    // For now, create test accounts
+    // For now, create test accounts with API keys
     for account_id in 1..=10 {
         account_manager.create_account(account_id, 1_000_000); // Each account with $1M buying power
+        
+        // Register API key for each account (format: "test-key-{account_id}")
+        let api_key = format!("test-key-{}", account_id);
+        auth_service.register_api_key(api_key.clone(), account_id).await;
     }
     tracing::info!("Created 10 test accounts (id=1-10), each with buying_power=1000000");
+    tracing::info!("Registered 10 test API keys (test-key-1 through test-key-10)");
 
     // Load engine configuration and connect
     let engines_config = EnginesConfig::from_file(&args.engines_config)?;
@@ -81,6 +96,8 @@ async fn main() -> anyhow::Result<()> {
     let ctx = Arc::new(GatewayContext {
         account_manager,
         engine_router,
+        auth_service,
+        session_manager,
         metrics: metrics.clone(),
         pending_orders: Arc::new(RwLock::new(HashMap::new())),
     });
