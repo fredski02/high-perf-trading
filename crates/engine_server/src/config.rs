@@ -49,14 +49,14 @@ impl Args {
     /// Get the journal path (with symbol-specific default)
     pub fn get_journal_path(&self) -> String {
         self.journal_path.clone().unwrap_or_else(|| {
-            format!("engine_{}_journal.bin", self.symbol_id)
+            format!("journal/engine_{}_journal.bin", self.symbol_id)
         })
     }
 
     /// Get the snapshot directory (with symbol-specific default)
     pub fn get_snapshot_dir(&self) -> String {
         self.snapshot_dir.clone().unwrap_or_else(|| {
-            format!("engine_{}_snapshots", self.symbol_id)
+            format!("journal/engine_{}_snapshots", self.symbol_id)
         })
     }
 }

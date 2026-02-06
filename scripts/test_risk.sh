@@ -1,5 +1,6 @@
 #!/bin/bash
 # Test risk rejection
+cd "$(dirname "$0")/.." || exit 1
 cargo build --release -q -p test_client
 
 cat > /tmp/test_risk.rs << 'RUST'

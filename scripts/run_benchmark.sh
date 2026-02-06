@@ -32,7 +32,7 @@ echo "  Client → Gateway → Engine → Gateway → Client"
 echo ""
 
 # Run the benchmark
-./target/release/bench --mode bench-distributed --json-addr 127.0.0.1:9001 --iters "$ITERS"
+../target/release/bench --mode bench-distributed --json-addr 127.0.0.1:9001 --iters "$ITERS"
 
 echo ""
 echo "Benchmark complete!"

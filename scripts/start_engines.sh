@@ -8,7 +8,7 @@ echo "Starting engine servers..."
 
 # Start BTC/USD engine on port 9100
 echo "Starting BTC/USD engine on :9100"
-RUST_LOG=info ./target/release/engine_server \
+RUST_LOG=info ../target/release/engine_server \
   --symbol-id 1 \
   --symbol-name "BTC/USD" \
   --listen-addr 127.0.0.1:9100 \
@@ -17,7 +17,7 @@ ENGINE1_PID=$!
 
 # Start ETH/USD engine on port 9101
 echo "Starting ETH/USD engine on :9101"
-RUST_LOG=info ./target/release/engine_server \
+RUST_LOG=info ../target/release/engine_server \
   --symbol-id 2 \
   --symbol-name "ETH/USD" \
   --listen-addr 127.0.0.1:9101 \

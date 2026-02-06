@@ -1,5 +1,6 @@
 #!/bin/bash
 # Quick test for risk rejection
+cd "$(dirname "$0")/.." || exit 1
 
 cat > /tmp/test_risk.rs << 'RUST'
 use bytes::{BufMut, BytesMut, Buf};

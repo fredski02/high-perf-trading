@@ -17,11 +17,11 @@ pub struct Args {
     pub admin_addr: String,
 
     /// Path to account journal file
-    #[arg(long, default_value = "gateway_journal.bin")]
+    #[arg(long, default_value = "journal/gateway_journal.bin")]
     pub journal_path: String,
 
     /// Directory for account snapshots
-    #[arg(long, default_value = "gateway_snapshots")]
+    #[arg(long, default_value = "journal/gateway_snapshots")]
     pub snapshot_dir: String,
 
     /// Journal fsync batch size (lower = more durable, higher = faster)
