@@ -21,7 +21,8 @@ fn bench_engine_process(c: &mut Criterion) {
     let metrics = Arc::new(Metrics::default());
     let (_tx_in, rx_in) = crossbeam_channel::bounded(1);
     let (tx_out, _rx_out) = crossbeam_channel::bounded(1);
-    let mut eng = Engine::new(rx_in, tx_out, metrics);
+    let (_query_tx, query_rx) = crossbeam_channel::bounded(1);
+    let mut eng = Engine::new(rx_in, tx_out, query_rx, metrics);
 
     let cmd = Command::NewOrder(NewOrder {
         client_seq: 1,

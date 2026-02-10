@@ -11,7 +11,8 @@ mod tests {
     fn mk_engine() -> Engine {
         let (_, in_rx) = unbounded();
         let (out_tx, _out_rx) = unbounded();
-        Engine::new(in_rx, out_tx, Arc::new(Metrics::default()))
+        let (_, query_rx) = unbounded();
+        Engine::new(in_rx, out_tx, query_rx, Arc::new(Metrics::default()))
     }
 
     #[test]
