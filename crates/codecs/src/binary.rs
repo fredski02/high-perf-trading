@@ -202,9 +202,7 @@ impl Codec for BinaryCodec {
             }
             MT_AUTHENTICATE => {
                 let api_key = get_string(&mut b)?;
-                Ok(Command::Authenticate(common::Authenticate {
-                    api_key,
-                }))
+                Ok(Command::Authenticate(common::Authenticate { api_key }))
             }
             _ => Err(ProtoError::Malformed("binary: unknown msg_type")),
         }
@@ -259,6 +257,5 @@ fn get_string(b: &mut Bytes) -> Result<String, ProtoError> {
         return Err(ProtoError::Malformed("binary: underrun"));
     }
     let bytes = b.copy_to_bytes(len);
-    String::from_utf8(bytes.to_vec())
-        .map_err(|_| ProtoError::Malformed("binary: invalid utf8"))
+    String::from_utf8(bytes.to_vec()).map_err(|_| ProtoError::Malformed("binary: invalid utf8"))
 }

@@ -43,9 +43,7 @@ impl Reconciliation {
         let mut reservations_by_account: HashMap<AccountId, i64> = HashMap::new();
 
         for order in &all_orders {
-            *reservations_by_account
-                .entry(order.account_id)
-                .or_insert(0) += order.reserved_amount;
+            *reservations_by_account.entry(order.account_id).or_insert(0) += order.reserved_amount;
         }
 
         // Update tentative_reserved for each account

@@ -33,7 +33,7 @@ impl AuthService {
     /// Verify an API key and return the associated account ID
     pub async fn authenticate(&self, api_key: &str) -> Result<AccountId> {
         let keys = self.api_keys.read().await;
-        
+
         keys.get(api_key)
             .copied()
             .ok_or_else(|| anyhow!("Invalid API key"))
@@ -74,14 +74,14 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_authenticate() {
         let auth = AuthService::new();
-        
+
         // Register an API key
         auth.register_api_key("test-key-123".to_string(), 42).await;
-        
+
         // Authenticate with valid key
         let account_id = auth.authenticate("test-key-123").await.unwrap();
         assert_eq!(account_id, 42);
-        
+
         // Authenticate with invalid key
         assert!(auth.authenticate("invalid-key").await.is_err());
     }
@@ -89,9 +89,9 @@ mod tests {
     #[tokio::test]
     async fn test_has_api_key() {
         let auth = AuthService::new();
-        
+
         auth.register_api_key("key1".to_string(), 1).await;
-        
+
         assert!(auth.has_api_key("key1").await);
         assert!(!auth.has_api_key("key2").await);
     }
@@ -99,14 +99,14 @@ mod tests {
     #[tokio::test]
     async fn test_revoke_api_key() {
         let auth = AuthService::new();
-        
+
         auth.register_api_key("key1".to_string(), 1).await;
         assert!(auth.has_api_key("key1").await);
-        
+
         // Revoke the key
         assert!(auth.revoke_api_key("key1").await);
         assert!(!auth.has_api_key("key1").await);
-        
+
         // Revoking again returns false
         assert!(!auth.revoke_api_key("key1").await);
     }
@@ -114,14 +114,14 @@ mod tests {
     #[tokio::test]
     async fn test_key_count() {
         let auth = AuthService::new();
-        
+
         assert_eq!(auth.key_count().await, 0);
-        
+
         auth.register_api_key("key1".to_string(), 1).await;
         auth.register_api_key("key2".to_string(), 2).await;
-        
+
         assert_eq!(auth.key_count().await, 2);
-        
+
         auth.revoke_api_key("key1").await;
         assert_eq!(auth.key_count().await, 1);
     }
@@ -129,12 +129,12 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_accounts() {
         let auth = AuthService::new();
-        
+
         // Register multiple keys for different accounts
         auth.register_api_key("alice-key".to_string(), 100).await;
         auth.register_api_key("bob-key".to_string(), 200).await;
         auth.register_api_key("charlie-key".to_string(), 300).await;
-        
+
         // Verify each returns correct account
         assert_eq!(auth.authenticate("alice-key").await.unwrap(), 100);
         assert_eq!(auth.authenticate("bob-key").await.unwrap(), 200);

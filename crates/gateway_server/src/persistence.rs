@@ -19,7 +19,7 @@ pub struct AccountJournal {
     file: File,
     #[allow(dead_code)]
     path: PathBuf,
-    
+
     // Batching
     batch_buffer: Vec<AccountUpdate>,
     #[allow(dead_code)]
@@ -27,7 +27,7 @@ pub struct AccountJournal {
     last_sync: Instant,
     #[allow(dead_code)]
     sync_interval: Duration,
-    
+
     // Stats
     updates_written: u64,
 }
@@ -54,17 +54,14 @@ impl AccountJournal {
         Self::open_with_config(path, JournalConfig::default())
     }
 
-    pub fn open_with_config(
-        path: impl AsRef<Path>,
-        config: JournalConfig,
-    ) -> anyhow::Result<Self> {
+    pub fn open_with_config(path: impl AsRef<Path>, config: JournalConfig) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        
+
         // Create parent directory if it doesn't exist
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -83,7 +80,7 @@ impl AccountJournal {
     }
 
     /// Append an account update with IMMEDIATE fsync
-    /// 
+    ///
     /// Since we only journal account creation (rare operation), we always fsync immediately
     /// to ensure zero data loss for account creation.
     #[inline]

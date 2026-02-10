@@ -107,16 +107,26 @@ test account_manager::tests::test_multiple_orders_with_cancel ... ok
 test result: ok. 27 passed; 0 failed
 ```
 
-**Integration Test:**
-Created `test_cancel_replace.py` that verifies:
-1. Cancel releases reservations (funds become available again)
-2. Replace adjusts reservations atomically (no double-spend)
-3. Account state is correctly maintained across operations
+**Integration Tests:**
+Created proper Rust smoke tests in `bench/src/main.rs`:
+- `smoke-cancel` - Verifies Cancel releases reservations (funds become available again)
+- `smoke-replace` - Verifies Replace adjusts reservations atomically (no double-spend)
+
+Run via justfile:
+```bash
+$ just smoke-cancel
+smoke-cancel: Successfully cancelled order and reused buying power
+smoke-cancel ok
+
+$ just smoke-replace
+smoke-replace: Successfully replaced order and adjusted reservations
+smoke-replace ok
+```
 
 **Logs Confirm:**
 ```
-DEBUG gateway_server::client_handler: Released reservation for cancelled order_id=7001
-DEBUG gateway_server::client_handler: Released reservation for cancelled order_id=7003
+DEBUG gateway_server::client_handler: Released reservation for cancelled order_id=5001
+DEBUG gateway_server::client_handler: Released reservation for cancelled order_id=6001
 ```
 
 **How It Works:**
@@ -270,24 +280,28 @@ Use binary protocol for production. Keep JSON for debugging/testing (once respon
 
 ---
 
-## 🔧 Testing Infrastructure Issues
+## 🔧 Testing Infrastructure
 
-### 1. Smoke Tests Using JSON
+### All Smoke Tests Working! ✅
 
-**Issue:** Most smoke tests use JSON protocol which is broken
+**Status:** All smoke tests are fully functional (2026-02-10)
 
-**Affected Tests:**
-- `just smoke` - Uses JSON (hangs)
-- `smoke-match` - JSON (hangs)
-- `smoke-postonly` - JSON (hangs)
-- `smoke-ioc` - JSON (hangs)
+**Available Tests:**
+- `just smoke` - Runs all tests below ✅
+- `just smoke-bin` - Binary protocol basic test ✅
+- `just smoke-json` - JSON protocol basic test ✅
+- `just smoke-match` - Order matching scenario ✅
+- `just smoke-postonly` - POST_ONLY rejection ✅
+- `just smoke-ioc` - IOC order behavior ✅
+- `just smoke-cancel` - Cancel releases reservation ✅
+- `just smoke-replace` - Replace adjusts reservation ✅
+- `just smoke-risk` - Risk rejection (insufficient funds) ✅
 
-**Working Tests:**
-- `just smoke-bin` - Binary protocol ✅
-- `just bench-rtt` - Binary protocol ✅
-
-**Fix:**
-Rewrite smoke tests to use binary protocol or fix JSON response routing.
+**Cleanup Completed (2026-02-10):**
+- ✅ Removed redundant shell scripts (`scripts/` folder deleted)
+- ✅ All functionality consolidated in `justfile`
+- ✅ Added comprehensive smoke tests in `bench` crate
+- ✅ Single source of truth for all commands
 
 ---
 

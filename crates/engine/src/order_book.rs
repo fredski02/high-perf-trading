@@ -378,7 +378,7 @@ impl OrderBook {
                     let reserved_amount = if order.side == common::Side::Buy {
                         order.price * order.qty_rem
                     } else {
-                        0  // Sells don't reserve buying power
+                        0 // Sells don't reserve buying power
                     };
 
                     common::OrderSnapshot {

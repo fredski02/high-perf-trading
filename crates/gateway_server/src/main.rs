@@ -63,43 +63,44 @@ async fn main() -> anyhow::Result<()> {
             batch_size: args.journal_batch_size,
             sync_interval: std::time::Duration::from_millis(100),
         };
-        
-        let mut journal = persistence::AccountJournal::open_with_config(&args.journal_path, journal_config)?;
-        
+
+        let mut journal =
+            persistence::AccountJournal::open_with_config(&args.journal_path, journal_config)?;
+
         // Try to load latest snapshot
         let snapshot = persistence::AccountSnapshot::load_latest(&args.snapshot_dir)?;
-        
+
         let account_manager = if let Some(snapshot) = snapshot {
             tracing::info!(
                 "Loaded snapshot (seq={}, accounts={})",
                 snapshot.sequence,
                 snapshot.accounts.len()
             );
-            
+
             // Read journal and replay updates after snapshot
             let updates = journal.read_all()?;
             tracing::info!("Loaded {} updates from journal", updates.len());
-            
+
             let mgr = Arc::new(AccountManager::with_journal(journal));
             mgr.restore_from_snapshot(&snapshot);
             mgr.replay_journal(updates);
-            
+
             mgr
         } else {
             tracing::info!("No snapshot found, starting with empty state");
-            
+
             // Read journal (if any) and replay
             let updates = journal.read_all()?;
             if !updates.is_empty() {
                 tracing::info!("Loaded {} updates from journal", updates.len());
             }
-            
+
             let mgr = Arc::new(AccountManager::with_journal(journal));
             mgr.replay_journal(updates);
-            
+
             mgr
         };
-        
+
         account_manager
     };
 
@@ -109,20 +110,24 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("No accounts found, creating 10 test accounts");
         for account_id in 1..=10 {
             account_manager.create_account(account_id, 1_000_000); // Each account with $1M buying power
-            
+
             // Register API key for each account (format: "test-key-{account_id}")
             let api_key = format!("test-key-{}", account_id);
-            auth_service.register_api_key(api_key.clone(), account_id).await;
+            auth_service
+                .register_api_key(api_key.clone(), account_id)
+                .await;
         }
         tracing::info!("Created 10 test accounts (id=1-10), each with buying_power=1000000");
         tracing::info!("Registered 10 test API keys (test-key-1 through test-key-10)");
     } else {
         tracing::info!("Recovered {} accounts from persistence", account_count);
-        
+
         // Still register test API keys for recovered accounts
         for account_id in 1..=10 {
             let api_key = format!("test-key-{}", account_id);
-            auth_service.register_api_key(api_key.clone(), account_id).await;
+            auth_service
+                .register_api_key(api_key.clone(), account_id)
+                .await;
         }
     }
 
@@ -151,11 +156,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Reconcile reservation state with engines
     tracing::info!("Reconciling reservation state with engines...");
-    let reconciliation = reconciliation::Reconciliation::new(
-        account_manager.clone(),
-        engine_router.clone(),
-    );
-    
+    let reconciliation =
+        reconciliation::Reconciliation::new(account_manager.clone(), engine_router.clone());
+
     if let Err(e) = reconciliation.rebuild_reservations().await {
         tracing::error!("Reconciliation failed: {}", e);
         tracing::warn!("Continuing with empty reservation state");
@@ -195,33 +198,34 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         let mut updates_since_snapshot = 0u64;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        
+
         loop {
             interval.tick().await;
-            
+
             // Check if we should create a snapshot
             updates_since_snapshot += 1;
-            
+
             if updates_since_snapshot >= snapshot_interval / 60 {
                 let sequence = updates_since_snapshot;
                 let snapshot = ctx_snapshot.account_manager.create_snapshot(sequence);
-                
+
                 match snapshot.save(&snapshot_dir) {
                     Ok(path) => {
                         tracing::info!("Snapshot saved: {:?}", path);
-                        
+
                         // Cleanup old snapshots (keep last 3)
-                        if let Err(e) = persistence::AccountSnapshot::cleanup_old(&snapshot_dir, 3) {
+                        if let Err(e) = persistence::AccountSnapshot::cleanup_old(&snapshot_dir, 3)
+                        {
                             tracing::warn!("Failed to cleanup old snapshots: {}", e);
                         }
-                        
+
                         updates_since_snapshot = 0;
                     }
                     Err(e) => {
                         tracing::error!("Failed to save snapshot: {}", e);
                     }
                 }
-                
+
                 // Flush journal
                 if let Err(e) = ctx_snapshot.account_manager.flush_journal() {
                     tracing::error!("Failed to flush journal: {}", e);

@@ -11,7 +11,10 @@ use tokio::{
 #[allow(unused_imports)]
 use common::Side;
 
-use common::{Ack, Authenticate, Command, Event, NewOrder, OrderFlags, RejectReason, TimeInForce};
+use common::{
+    Ack, Authenticate, Cancel, Command, Event, NewOrder, OrderFlags, RejectReason, Replace,
+    TimeInForce,
+};
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(long, default_value = "smoke-all")]
@@ -49,10 +52,25 @@ async fn main() -> anyhow::Result<()> {
             smoke_ioc_json(&args.json_addr).await?;
             println!("smoke-ioc ok");
         }
+        "smoke-cancel" => {
+            smoke_cancel_json(&args.json_addr).await?;
+            println!("smoke-cancel ok");
+        }
+        "smoke-replace" => {
+            smoke_replace_json(&args.json_addr).await?;
+            println!("smoke-replace ok");
+        }
+        "smoke-risk" => {
+            smoke_risk_json(&args.json_addr).await?;
+            println!("smoke-risk ok");
+        }
         "smoke-all" => {
             smoke_match_json(&args.json_addr).await?;
             smoke_postonly_json(&args.json_addr).await?;
             smoke_ioc_json(&args.json_addr).await?;
+            smoke_cancel_json(&args.json_addr).await?;
+            smoke_replace_json(&args.json_addr).await?;
+            smoke_risk_json(&args.json_addr).await?;
             println!("smoke-all ok");
         }
         "bench-bin" => {
@@ -84,10 +102,10 @@ async fn main() -> anyhow::Result<()> {
 
 async fn smoke_json(addr: &str) -> anyhow::Result<()> {
     let mut s = TcpStream::connect(addr).await?;
-    
+
     // Authenticate first
     authenticate_json(&mut s, "test-key-7").await?;
-    
+
     let cmd = Command::NewOrder(NewOrder {
         client_seq: 1,
         order_id: 1,
@@ -141,7 +159,7 @@ async fn smoke_bin(addr: &str) -> anyhow::Result<()> {
 // Rest ask 100 x 5, then buy 110 x 3 -> should Fill 3 @ 100, leave ask 100 x 2.
 async fn smoke_match_json(addr: &str) -> anyhow::Result<()> {
     let mut s = TcpStream::connect(addr).await?;
-    
+
     // Authenticate first
     authenticate_json(&mut s, "test-key-7").await?;
 
@@ -164,7 +182,7 @@ async fn smoke_match_json(addr: &str) -> anyhow::Result<()> {
     let buy = Command::NewOrder(NewOrder {
         client_seq: 2,
         order_id: 202,
-        account_id: 7,  // Same account as maker
+        account_id: 7, // Same account as maker
         symbol_id: 1,
         side: Side::Buy,
         price: 110,
@@ -211,7 +229,7 @@ async fn smoke_match_json(addr: &str) -> anyhow::Result<()> {
 // Rest ask 100 x5, then post-only buy 110 x1 -> should Reject(PostOnlyWouldCross)
 async fn smoke_postonly_json(addr: &str) -> anyhow::Result<()> {
     let mut s = TcpStream::connect(addr).await?;
-    
+
     // Authenticate first
     authenticate_json(&mut s, "test-key-7").await?;
 
@@ -234,7 +252,7 @@ async fn smoke_postonly_json(addr: &str) -> anyhow::Result<()> {
     let po_buy = Command::NewOrder(NewOrder {
         client_seq: 2,
         order_id: 302,
-        account_id: 7,  // Same account as maker
+        account_id: 7, // Same account as maker
         symbol_id: 1,
         side: Side::Buy,
         price: 110,
@@ -273,7 +291,7 @@ async fn smoke_postonly_json(addr: &str) -> anyhow::Result<()> {
 // Rest ask 100 x5, then IOC buy 110 x10 -> should Fill 5 @ 100, and book becomes empty (no ask).
 async fn smoke_ioc_json(addr: &str) -> anyhow::Result<()> {
     let mut s = TcpStream::connect(addr).await?;
-    
+
     // Authenticate first
     authenticate_json(&mut s, "test-key-7").await?;
 
@@ -296,7 +314,7 @@ async fn smoke_ioc_json(addr: &str) -> anyhow::Result<()> {
     let ioc_buy = Command::NewOrder(NewOrder {
         client_seq: 2,
         order_id: 402,
-        account_id: 7,  // Same account as maker
+        account_id: 7, // Same account as maker
         symbol_id: 1,
         side: Side::Buy,
         price: 110,
@@ -338,6 +356,207 @@ async fn smoke_ioc_json(addr: &str) -> anyhow::Result<()> {
     }
 
     println!("smoke-ioc events:\n{:#?}", all);
+    Ok(())
+}
+
+// -------------------- Smoke: Cancel releases reservation --------------------
+//
+// Place a buy order (reserves buying power), cancel it, then place another order
+// with the same funds. The second order should succeed, proving reservation was released.
+async fn smoke_cancel_json(addr: &str) -> anyhow::Result<()> {
+    let mut s = TcpStream::connect(addr).await?;
+
+    // Authenticate
+    authenticate_json(&mut s, "test-key-5").await?;
+
+    // Place a buy order for 50000 @ qty 1 (reserves 50k buying power)
+    let order1 = Command::NewOrder(NewOrder {
+        client_seq: 1,
+        order_id: 5001,
+        account_id: 5,
+        symbol_id: 1,
+        side: Side::Buy,
+        price: 50000,
+        qty: 1,
+        tif: TimeInForce::Gtc,
+        flags: OrderFlags { post_only: true }, // POST_ONLY so it rests in book
+    });
+    write_json_cmd(&mut s, &order1).await?;
+    let evs1 = read_until_ack_json(&mut s, 1).await?;
+
+    // Cancel the order (should release the 50k reservation)
+    let cancel = Command::Cancel(Cancel {
+        client_seq: 2,
+        order_id: 5001,
+        account_id: 5,
+        symbol_id: 1,
+    });
+    write_json_cmd(&mut s, &cancel).await?;
+    let evs2 = read_until_ack_json(&mut s, 2).await?;
+
+    // Place another buy order with same 50k (should succeed if reservation was released)
+    let order2 = Command::NewOrder(NewOrder {
+        client_seq: 3,
+        order_id: 5002,
+        account_id: 5,
+        symbol_id: 1,
+        side: Side::Buy,
+        price: 50000,
+        qty: 1,
+        tif: TimeInForce::Gtc,
+        flags: OrderFlags { post_only: true },
+    });
+    write_json_cmd(&mut s, &order2).await?;
+    let evs3 = read_until_ack_json(&mut s, 3).await?;
+
+    let all = [evs1, evs2, evs3].concat();
+
+    // Verify we got Acks for both orders (proving second order succeeded)
+    let got_ack1 = all
+        .iter()
+        .any(|ev| matches!(ev, Event::Ack(ack) if ack.order_id == 5001));
+    let got_ack2 = all
+        .iter()
+        .any(|ev| matches!(ev, Event::Ack(ack) if ack.order_id == 5002));
+
+    // Verify cancel was acknowledged
+    let got_cancel_ack = all
+        .iter()
+        .any(|ev| matches!(ev, Event::Ack(ack) if ack.order_id == 5001 && ack.client_seq == 2));
+
+    if !got_ack1 || !got_cancel_ack || !got_ack2 {
+        anyhow::bail!(
+            "smoke-cancel failed: got_ack1={} got_cancel_ack={} got_ack2={}. Events:\n{:#?}",
+            got_ack1,
+            got_cancel_ack,
+            got_ack2,
+            all
+        );
+    }
+
+    println!("smoke-cancel: Successfully cancelled order and reused buying power");
+    Ok(())
+}
+
+// -------------------- Smoke: Replace adjusts reservation --------------------
+//
+// Place a buy order, replace it with higher price (adjust reservation up),
+// then replace with lower price (adjust reservation down).
+async fn smoke_replace_json(addr: &str) -> anyhow::Result<()> {
+    let mut s = TcpStream::connect(addr).await?;
+
+    // Authenticate
+    authenticate_json(&mut s, "test-key-6").await?;
+
+    // Place initial buy order for 40000 @ qty 1 (reserves 40k)
+    let order = Command::NewOrder(NewOrder {
+        client_seq: 1,
+        order_id: 6001,
+        account_id: 6,
+        symbol_id: 1,
+        side: Side::Buy,
+        price: 40000,
+        qty: 1,
+        tif: TimeInForce::Gtc,
+        flags: OrderFlags { post_only: true },
+    });
+    write_json_cmd(&mut s, &order).await?;
+    let evs1 = read_until_ack_json(&mut s, 1).await?;
+
+    // Replace with higher price 60000 (should adjust reservation to 60k)
+    let replace1 = Command::Replace(Replace {
+        client_seq: 2,
+        order_id: 6001,
+        account_id: 6,
+        symbol_id: 1,
+        new_price: 60000,
+        new_qty: 1,
+    });
+    write_json_cmd(&mut s, &replace1).await?;
+    let evs2 = read_until_ack_json(&mut s, 2).await?;
+
+    // Replace with lower price 30000 (should adjust reservation down to 30k)
+    let replace2 = Command::Replace(Replace {
+        client_seq: 3,
+        order_id: 6001,
+        account_id: 6,
+        symbol_id: 1,
+        new_price: 30000,
+        new_qty: 1,
+    });
+    write_json_cmd(&mut s, &replace2).await?;
+    let evs3 = read_until_ack_json(&mut s, 3).await?;
+
+    let all = [evs1, evs2, evs3].concat();
+
+    // Verify we got Acks for all operations
+    let got_new_ack = all
+        .iter()
+        .any(|ev| matches!(ev, Event::Ack(ack) if ack.order_id == 6001 && ack.client_seq == 1));
+    let got_replace1_ack = all
+        .iter()
+        .any(|ev| matches!(ev, Event::Ack(ack) if ack.order_id == 6001 && ack.client_seq == 2));
+    let got_replace2_ack = all
+        .iter()
+        .any(|ev| matches!(ev, Event::Ack(ack) if ack.order_id == 6001 && ack.client_seq == 3));
+
+    if !got_new_ack || !got_replace1_ack || !got_replace2_ack {
+        anyhow::bail!(
+            "smoke-replace failed: got_new_ack={} got_replace1_ack={} got_replace2_ack={}. Events:\n{:#?}",
+            got_new_ack,
+            got_replace1_ack,
+            got_replace2_ack,
+            all
+        );
+    }
+
+    println!("smoke-replace: Successfully replaced order and adjusted reservations");
+    Ok(())
+}
+
+// -------------------- Smoke: Risk rejection --------------------
+//
+// Test that orders with insufficient buying power are rejected.
+// Account 8 has $1M buying power. We try to buy 1 @ $2M, which should be rejected.
+async fn smoke_risk_json(addr: &str) -> anyhow::Result<()> {
+    let mut s = TcpStream::connect(addr).await?;
+
+    // Authenticate
+    authenticate_json(&mut s, "test-key-8").await?;
+
+    // Account 8 has $1M = 1,000,000 buying power
+    // Try to buy 1 @ 2,000,000 (exceeds buying power)
+    let order = Command::NewOrder(NewOrder {
+        client_seq: 1,
+        order_id: 8001,
+        account_id: 8,
+        symbol_id: 1,
+        side: Side::Buy,
+        price: 2_000_000, // $2M - exceeds $1M buying power
+        qty: 1,
+        tif: TimeInForce::Gtc,
+        flags: OrderFlags { post_only: false },
+    });
+
+    write_json_cmd(&mut s, &order).await?;
+
+    // Should get a Reject event (not an Ack)
+    let events = read_n_events_json(&mut s, 1).await?;
+
+    // Verify we got a Reject with reason=Risk
+    let got_risk_reject = events.iter().any(|ev| match ev {
+        Event::Reject(r) => matches!(r.reason, RejectReason::Risk) && r.client_seq == 1,
+        _ => false,
+    });
+
+    if !got_risk_reject {
+        anyhow::bail!(
+            "smoke-risk failed: expected Reject(Risk), got: {:#?}",
+            events
+        );
+    }
+
+    println!("smoke-risk: Successfully rejected order with insufficient buying power");
     Ok(())
 }
 
@@ -831,9 +1050,9 @@ async fn authenticate_json(s: &mut TcpStream, api_key: &str) -> anyhow::Result<(
     let auth_cmd = Command::Authenticate(Authenticate {
         api_key: api_key.to_string(),
     });
-    
+
     write_json_cmd(s, &auth_cmd).await?;
-    
+
     // Read and verify AuthSuccess response
     let event = read_json_event(s).await?;
     match event {

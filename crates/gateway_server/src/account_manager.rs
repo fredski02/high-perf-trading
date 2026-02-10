@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Events that modify account state (for journaling)
-/// 
+///
 /// NOTE: Only account creation is journaled. Fills, risk limits, and balance updates
 /// are NOT journaled - engines are the source of truth for these.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +138,7 @@ impl AccountManager {
     pub fn create_account(&self, account_id: AccountId, buying_power: i64) {
         self.accounts
             .insert(account_id, AccountState::new(account_id, buying_power));
-        
+
         // Log to journal
         self.log_update(AccountUpdate::CreateAccount {
             account_id,
@@ -268,7 +268,7 @@ impl AccountManager {
 
                 // Realized PnL calculation would go here
                 // For now, simplified
-                
+
                 // NOTE: Fills are NOT journaled - engines are the source of truth
             }
         }
@@ -360,7 +360,7 @@ impl AccountManager {
 
         // Calculate available including the old reservation (which we'll release)
         let available = state.buying_power - state.tentative_reserved + old_token.amount;
-        
+
         if new_amount > available {
             return Err(RiskViolation::InsufficientFunds);
         }
@@ -424,17 +424,17 @@ impl AccountManager {
         // Restore each account
         for acc in &snapshot.accounts {
             let mut state = AccountState::new(acc.account_id, acc.buying_power);
-            
+
             // Restore positions
             for (symbol_id, position) in &acc.positions {
                 state.positions.insert(*symbol_id, *position);
             }
-            
+
             // Restore risk limits
             for (symbol_id, limits) in &acc.risk_limits {
                 state.risk_limits.insert(*symbol_id, *limits);
             }
-            
+
             self.accounts.insert(acc.account_id, state);
         }
 
@@ -446,7 +446,7 @@ impl AccountManager {
     }
 
     /// Replay journal updates to rebuild state
-    /// 
+    ///
     /// Since we only journal account creation now, this simply recreates accounts.
     /// Fills, risk limits, and balance updates are handled via engine reconciliation.
     pub fn replay_journal(&self, updates: Vec<AccountUpdate>) {
@@ -460,8 +460,7 @@ impl AccountManager {
                     // Don't log during replay
                     self.accounts
                         .insert(account_id, AccountState::new(account_id, buying_power));
-                }
-                // No other variants exist after simplification
+                } // No other variants exist after simplification
             }
         }
 
@@ -726,34 +725,34 @@ mod tests {
     #[test]
     fn test_persistence_journal_roundtrip() {
         use tempfile::tempdir;
-        
+
         let dir = tempdir().unwrap();
         let journal_path = dir.path().join("test_journal.bin");
-        
+
         // Create manager with journal
         let journal = crate::persistence::AccountJournal::open(&journal_path).unwrap();
         let mgr = AccountManager::with_journal(journal);
-        
+
         // Create some accounts
         mgr.create_account(1, 100000);
         mgr.create_account(2, 200000);
-        
+
         // Flush to disk
         mgr.flush_journal().unwrap();
-        
+
         // Create new manager and replay
         let mut journal2 = crate::persistence::AccountJournal::open(&journal_path).unwrap();
         let updates = journal2.read_all().unwrap();
-        
+
         assert_eq!(updates.len(), 2);
-        
+
         let mgr2 = AccountManager::new();
         mgr2.replay_journal(updates);
-        
+
         // Verify accounts were restored
         let acc1 = mgr2.get_account(1).unwrap();
         assert_eq!(acc1.buying_power, 100000);
-        
+
         let acc2 = mgr2.get_account(2).unwrap();
         assert_eq!(acc2.buying_power, 200000);
     }
@@ -761,37 +760,37 @@ mod tests {
     #[test]
     fn test_persistence_snapshot_roundtrip() {
         use tempfile::tempdir;
-        
+
         let dir = tempdir().unwrap();
         let snapshot_dir = dir.path().join("snapshots");
-        
+
         let mgr = AccountManager::new();
-        
+
         // Create some accounts with positions
         mgr.create_account(1, 100000);
         mgr.create_account(2, 200000);
-        
+
         // Create snapshot
         let snapshot = mgr.create_snapshot(42);
         assert_eq!(snapshot.sequence, 42);
         assert_eq!(snapshot.accounts.len(), 2);
-        
+
         // Save and load
         snapshot.save(&snapshot_dir).unwrap();
         let loaded = crate::persistence::AccountSnapshot::load_latest(&snapshot_dir)
             .unwrap()
             .unwrap();
-        
+
         assert_eq!(loaded.sequence, 42);
         assert_eq!(loaded.accounts.len(), 2);
-        
+
         // Restore to new manager
         let mgr2 = AccountManager::new();
         mgr2.restore_from_snapshot(&loaded);
-        
+
         let acc1 = mgr2.get_account(1).unwrap();
         assert_eq!(acc1.buying_power, 100000);
-        
+
         let acc2 = mgr2.get_account(2).unwrap();
         assert_eq!(acc2.buying_power, 200000);
     }
@@ -799,28 +798,28 @@ mod tests {
     #[test]
     fn test_persistence_fill_replay() {
         use tempfile::tempdir;
-        
+
         let dir = tempdir().unwrap();
         let journal_path = dir.path().join("test_journal.bin");
-        
+
         let journal = crate::persistence::AccountJournal::open(&journal_path).unwrap();
         let mgr = AccountManager::with_journal(journal);
-        
+
         // Create account
         mgr.create_account(1, 100000);
-        
+
         // NOTE: Fills are no longer journaled - engines are source of truth
         // This test now only verifies account creation persistence
-        
+
         mgr.flush_journal().unwrap();
-        
+
         // Replay in new manager
         let mut journal2 = crate::persistence::AccountJournal::open(&journal_path).unwrap();
         let updates = journal2.read_all().unwrap();
-        
+
         let mgr2 = AccountManager::new();
         mgr2.replay_journal(updates);
-        
+
         // Verify account was persisted and replayed
         let acc = mgr2.get_account(1).unwrap();
         assert_eq!(acc.buying_power, 100000);

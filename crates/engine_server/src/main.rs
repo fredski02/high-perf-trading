@@ -62,7 +62,8 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics_engine = metrics.clone();
     std::thread::spawn(move || {
-        let mut engine = Engine::new_with_config(in_rx, out_tx, query_rx, metrics_engine, engine_config);
+        let mut engine =
+            Engine::new_with_config(in_rx, out_tx, query_rx, metrics_engine, engine_config);
 
         // Restore from persistence
         if let Err(e) = engine.restore_from_persistence() {

@@ -36,7 +36,10 @@ async fn main() {
     let auth_result = read_auth_response(&mut read_half).await;
     match auth_result {
         Some((true, Some(account_id))) => {
-            println!("✓ Successfully authenticated as account_id={}\n", account_id);
+            println!(
+                "✓ Successfully authenticated as account_id={}\n",
+                account_id
+            );
         }
         Some((false, None)) => {
             println!("✗ Authentication failed (unexpected)\n");
@@ -125,7 +128,7 @@ async fn send_authenticate(
 ) {
     let mut payload = BytesMut::with_capacity(256);
     payload.put_u16_le(MT_AUTHENTICATE);
-    
+
     // String encoding: [u32 length][bytes]
     let key_bytes = api_key.as_bytes();
     payload.put_u32_le(key_bytes.len() as u32);
@@ -143,7 +146,7 @@ async fn read_auth_response(
         Ok(Some(Ok(frame))) => {
             let mut b = frame.clone();
             let mt = b.get_u16_le();
-            
+
             match mt {
                 MT_AUTH_SUCCESS => {
                     let account_id = b.get_u32_le();
@@ -202,7 +205,7 @@ async fn read_order_response(
         Ok(Some(Ok(frame))) => {
             let mut b = frame.clone();
             let mt = b.get_u16_le();
-            
+
             match mt {
                 MT_ACK => {
                     println!("  Received: Ack");

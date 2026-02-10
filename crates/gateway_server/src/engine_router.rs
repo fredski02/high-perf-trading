@@ -173,36 +173,44 @@ impl EngineRouter {
     /// Called during gateway startup BEFORE client_handler starts consuming events.
     pub async fn query_all_engines_for_orders(&self) -> Result<Vec<common::OrderSnapshot>> {
         tracing::info!("Querying all engines for their active orders");
-        
+
         let mut all_orders = Vec::new();
-        
+
         // Get all symbol_ids
         let symbol_ids: Vec<SymbolId> = {
             let senders = self.senders.lock().await;
             senders.keys().copied().collect()
         };
-        
+
         tracing::debug!("Querying {} engines", symbol_ids.len());
-        
+
         // Send queries to all engines
         for symbol_id in &symbol_ids {
             let msg = GatewayToEngine::QueryAllOrders;
             self.route_to_engine(&msg, *symbol_id).await?;
             tracing::debug!("Sent QueryAllOrders to engine {}", symbol_id);
         }
-        
+
         // Collect responses (we expect one AllOrders per engine)
         let timeout = tokio::time::Duration::from_secs(5);
         let num_engines = symbol_ids.len();
-        
+
         for i in 0..num_engines {
             match tokio::time::timeout(timeout, self.recv_event()).await {
                 Ok(Some(EngineToGateway::AllOrders(orders))) => {
-                    tracing::info!("Received {} orders from engine {}/{}", orders.len(), i + 1, num_engines);
+                    tracing::info!(
+                        "Received {} orders from engine {}/{}",
+                        orders.len(),
+                        i + 1,
+                        num_engines
+                    );
                     all_orders.extend(orders);
                 }
                 Ok(Some(other)) => {
-                    tracing::warn!("Unexpected event during reconciliation (ignoring): {:?}", other);
+                    tracing::warn!(
+                        "Unexpected event during reconciliation (ignoring): {:?}",
+                        other
+                    );
                     // Ignore other events during reconciliation - they shouldn't happen during startup
                 }
                 Ok(None) => {
@@ -213,8 +221,11 @@ impl EngineRouter {
                 }
             }
         }
-        
-        tracing::info!("Received total of {} orders from all engines", all_orders.len());
+
+        tracing::info!(
+            "Received total of {} orders from all engines",
+            all_orders.len()
+        );
         Ok(all_orders)
     }
 }

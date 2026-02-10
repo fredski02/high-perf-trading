@@ -128,7 +128,7 @@ pub fn command_symbol_id(cmd: &Command) -> Option<SymbolId> {
         Command::Replace(r) => Some(r.symbol_id),
         Command::SetRiskLimits(s) => Some(s.symbol_id),
         Command::QueryAccount(q) => Some(q.symbol_id),
-        Command::Authenticate(_) => None,  // Auth doesn't have symbol_id
+        Command::Authenticate(_) => None, // Auth doesn't have symbol_id
     }
 }
 
@@ -141,7 +141,7 @@ pub fn command_account_id(cmd: &Command) -> Option<AccountId> {
         Command::Replace(r) => Some(r.account_id),
         Command::SetRiskLimits(s) => Some(s.account_id),
         Command::QueryAccount(q) => Some(q.account_id),
-        Command::Authenticate(_) => None,  // Auth doesn't have account_id yet
+        Command::Authenticate(_) => None, // Auth doesn't have account_id yet
     }
 }
 

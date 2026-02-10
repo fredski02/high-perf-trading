@@ -45,7 +45,8 @@ pub async fn handle_gateway_connection(
     let (mut write_half, mut read_half) = framed.split();
 
     // Channel for query responses (read loop will send responses here)
-    let (query_response_tx, mut query_response_rx) = tokio::sync::mpsc::unbounded_channel::<EngineToGateway>();
+    let (query_response_tx, mut query_response_rx) =
+        tokio::sync::mpsc::unbounded_channel::<EngineToGateway>();
 
     // Spawn write loop to send events back to gateway
     let metrics_write = metrics.clone();
@@ -79,13 +80,13 @@ pub async fn handle_gateway_connection(
 
                         metrics_write.inc_frames_out();
                     }
-                    
+
                     // Flush after processing all available events
                     if write_half.flush().await.is_err() {
                         return;
                     }
                 }
-                
+
                 // Handle query responses
                 Some(response) = query_response_rx.recv() => {
                     let serialized = match postcard::to_allocvec(&response) {
@@ -95,15 +96,15 @@ pub async fn handle_gateway_connection(
                             continue;
                         }
                     };
-                    
+
                     if write_half.feed(Bytes::from(serialized)).await.is_err() {
                         break;
                     }
-                    
+
                     if write_half.flush().await.is_err() {
                         break;
                     }
-                    
+
                     metrics_write.inc_frames_out();
                 }
             }
@@ -111,7 +112,14 @@ pub async fn handle_gateway_connection(
     });
 
     // Read loop: receive commands from gateway
-    let read_result = gateway_read_loop(&mut read_half, query_response_tx, engine_in, query_tx, metrics).await;
+    let read_result = gateway_read_loop(
+        &mut read_half,
+        query_response_tx,
+        engine_in,
+        query_tx,
+        metrics,
+    )
+    .await;
 
     // Cleanup
     write_task.abort();
@@ -165,22 +173,25 @@ async fn gateway_read_loop(
             GatewayToEngine::QueryAllOrders => {
                 // Query all orders request for reconciliation
                 tracing::debug!("Received QueryAllOrders from gateway");
-                
+
                 // Create oneshot channel for response
                 let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                
+
                 // Send query to engine thread
                 let query = engine::EngineQuery::GetAllOrders { response_tx };
                 if let Err(e) = query_tx.send(query) {
                     warn!("Failed to send query to engine: {}", e);
                     continue;
                 }
-                
+
                 // Wait for response from engine thread
                 match response_rx.await {
                     Ok(orders) => {
-                        tracing::info!("Received {} orders from engine, sending to gateway", orders.len());
-                        
+                        tracing::info!(
+                            "Received {} orders from engine, sending to gateway",
+                            orders.len()
+                        );
+
                         // Send AllOrders response back to gateway via channel
                         let response = EngineToGateway::AllOrders(orders);
                         if query_response_tx.send(response).is_err() {

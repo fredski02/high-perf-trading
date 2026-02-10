@@ -58,9 +58,24 @@ smoke-json:
   @echo "Running JSON protocol smoke test..."
   cargo run --release -p bench -- --mode smoke-match --json-addr 127.0.0.1:9001
 
+# Run smoke test: Cancel releases reservation
+smoke-cancel:
+  @echo "Running Cancel reservation test..."
+  cargo run --release -p bench -- --mode smoke-cancel --json-addr 127.0.0.1:9001
+
+# Run smoke test: Replace adjusts reservation
+smoke-replace:
+  @echo "Running Replace reservation test..."
+  cargo run --release -p bench -- --mode smoke-replace --json-addr 127.0.0.1:9001
+
+# Run smoke test: Risk rejection (insufficient buying power)
+smoke-risk:
+  @echo "Running risk rejection test..."
+  cargo run --release -p bench -- --mode smoke-risk --json-addr 127.0.0.1:9001
+
 # Run all smoke tests
-smoke: smoke-bin smoke-json
-  @echo "✓ All smoke tests completed (binary + JSON)"
+smoke: smoke-bin smoke-json smoke-cancel smoke-replace smoke-risk
+  @echo "✓ All smoke tests completed (binary + JSON + Cancel + Replace + Risk)"
 
 # ==================== Benchmarking ====================
 

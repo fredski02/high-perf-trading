@@ -196,7 +196,7 @@ impl Engine {
                             // Get all order snapshots from the order book
                             let orders = self.book.get_all_order_snapshots();
                             info!("engine: responding to GetAllOrders query with {} orders", orders.len());
-                            
+
                             // Send response back (ignore error if receiver dropped)
                             let _ = response_tx.send(orders);
                         }

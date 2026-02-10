@@ -44,7 +44,7 @@ pub struct OrderMetadata {
     pub reservation_token: ReservationToken,
     pub side: Side,
     pub operation: PendingOperation,
-    pub conn_id: u64,  // Which client connection owns this order
+    pub conn_id: u64, // Which client connection owns this order
 }
 
 /// Client connection info for routing responses
@@ -105,7 +105,11 @@ pub async fn handle_client_connection(
             codec: codec.clone(),
         };
         senders.insert(conn_id, client_info);
-        info!("✅ Registered client conn_id={} in registry (codec={:?})", conn_id, codec.name());
+        info!(
+            "✅ Registered client conn_id={} in registry (codec={:?})",
+            conn_id,
+            codec.name()
+        );
     }
 
     // Spawn write loop
@@ -138,14 +142,20 @@ pub async fn handle_client_connection(
         let mut senders = client_senders.write().await;
         senders.remove(&conn_id);
     }
-    
+
     // Unregister session if client was authenticated
     if let Some(account_id) = ctx.session_manager.unregister(conn_id).await {
-        info!("Client disconnected: conn_id={}, account_id={}", conn_id, account_id);
+        info!(
+            "Client disconnected: conn_id={}, account_id={}",
+            conn_id, account_id
+        );
     } else {
-        info!("Client disconnected: conn_id={} (was not authenticated)", conn_id);
+        info!(
+            "Client disconnected: conn_id={} (was not authenticated)",
+            conn_id
+        );
     }
-    
+
     write_task.abort();
 
     read_result
@@ -160,7 +170,8 @@ async fn client_read_loop(
     ctx: Arc<GatewayContext>,
 ) -> Result<()> {
     // Track pending orders: order_id -> (reservation_token, is_buy, operation)
-    let mut pending_orders: HashMap<u64, (ReservationToken, bool, PendingOperation)> = HashMap::new();
+    let mut pending_orders: HashMap<u64, (ReservationToken, bool, PendingOperation)> =
+        HashMap::new();
 
     while let Some(frame_result) = read_half.next().await {
         let frame = frame_result.context("read frame failed")?;
@@ -236,7 +247,10 @@ async fn client_read_loop(
                 Ok(account_id) => {
                     // Register the session
                     ctx.session_manager.register(conn_id, account_id).await;
-                    info!("Client authenticated: conn_id={}, account_id={}", conn_id, account_id);
+                    info!(
+                        "Client authenticated: conn_id={}, account_id={}",
+                        conn_id, account_id
+                    );
                     Event::AuthSuccess(common::AuthSuccess { account_id })
                 }
                 Err(err) => {
@@ -259,7 +273,7 @@ async fn client_read_loop(
         // All other commands require authentication
         if !ctx.session_manager.is_authenticated(conn_id).await {
             warn!("Unauthenticated command rejected: conn_id={}", conn_id);
-            
+
             let reject = Event::Reject(common::Reject {
                 server_seq: ctx.account_manager.next_seq(),
                 client_seq: 0, // Don't know client_seq for unauthenticated commands
@@ -288,14 +302,17 @@ async fn client_read_loop(
         if let Command::Cancel(cancel) = &cmd {
             // Mark order as cancel pending so we can release reservation when ack arrives
             if let Some((token, is_buy, _)) = pending_orders.get(&cancel.order_id) {
-                pending_orders.insert(cancel.order_id, (token.clone(), *is_buy, PendingOperation::CancelPending));
+                pending_orders.insert(
+                    cancel.order_id,
+                    (token.clone(), *is_buy, PendingOperation::CancelPending),
+                );
             }
-            
+
             // Also update global tracking
             if let Some(metadata) = ctx.pending_orders.write().await.get_mut(&cancel.order_id) {
                 metadata.operation = PendingOperation::CancelPending;
             }
-            
+
             let gateway_seq = ctx.account_manager.next_seq();
             let risk_token = common::RiskToken {
                 account_id: cancel.account_id,
@@ -305,19 +322,29 @@ async fn client_read_loop(
 
             let gateway_msg = GatewayToEngine::execute(cmd.clone(), conn_id, risk_token);
 
-            if let Err(e) = ctx.engine_router.route_to_engine(&gateway_msg, symbol_id).await {
-                warn!("Failed to route Cancel to engine for symbol_id={}: {}", symbol_id, e);
-                
+            if let Err(e) = ctx
+                .engine_router
+                .route_to_engine(&gateway_msg, symbol_id)
+                .await
+            {
+                warn!(
+                    "Failed to route Cancel to engine for symbol_id={}: {}",
+                    symbol_id, e
+                );
+
                 // Restore order to Active state since cancel failed
                 if let Some((token, is_buy, _)) = pending_orders.get(&cancel.order_id) {
-                    pending_orders.insert(cancel.order_id, (token.clone(), *is_buy, PendingOperation::Active));
+                    pending_orders.insert(
+                        cancel.order_id,
+                        (token.clone(), *is_buy, PendingOperation::Active),
+                    );
                 }
-                
+
                 // Also restore in global tracking
                 if let Some(metadata) = ctx.pending_orders.write().await.get_mut(&cancel.order_id) {
                     metadata.operation = PendingOperation::Active;
                 }
-                
+
                 let reject = Event::Reject(common::Reject {
                     server_seq: ctx.account_manager.next_seq(),
                     client_seq: cancel.client_seq,
@@ -340,7 +367,8 @@ async fn client_read_loop(
             // Look up old reservation for this order_id
             let old_token = {
                 let pending = ctx.pending_orders.read().await;
-                pending.get(&replace.order_id)
+                pending
+                    .get(&replace.order_id)
                     .map(|metadata| metadata.reservation_token.clone())
             };
 
@@ -351,7 +379,10 @@ async fn client_read_loop(
                         Ok(new_token) => new_token,
                         Err(err) => {
                             // Risk check failed for replace
-                            warn!("Replace risk check failed for conn_id={}: {:?}", conn_id, err);
+                            warn!(
+                                "Replace risk check failed for conn_id={}: {:?}",
+                                conn_id, err
+                            );
 
                             let reject = Event::Reject(common::Reject {
                                 server_seq: ctx.account_manager.next_seq(),
@@ -372,7 +403,10 @@ async fn client_read_loop(
                 }
                 None => {
                     // Order not found in pending orders - reject
-                    warn!("Replace failed: order_id={} not found in pending orders", replace.order_id);
+                    warn!(
+                        "Replace failed: order_id={} not found in pending orders",
+                        replace.order_id
+                    );
 
                     let reject = Event::Reject(common::Reject {
                         server_seq: ctx.account_manager.next_seq(),
@@ -393,7 +427,7 @@ async fn client_read_loop(
         } else {
             // Do risk check and get reservation token for NewOrder
             match ctx.account_manager.check_and_reserve(&cmd) {
-            Ok(token) => token,
+                Ok(token) => token,
                 Err(err) => {
                     // Risk check failed - send reject to client
                     warn!("Risk check failed for conn_id={}: {:?}", conn_id, err);
@@ -427,7 +461,10 @@ async fn client_read_loop(
         // Track pending order (both locally and globally)
         match &cmd {
             Command::NewOrder(order) => {
-                pending_orders.insert(order.order_id, (reservation_token.clone(), is_buy, PendingOperation::Active));
+                pending_orders.insert(
+                    order.order_id,
+                    (reservation_token.clone(), is_buy, PendingOperation::Active),
+                );
 
                 // Also store in global tracking for handle_engine_responses
                 let side = if is_buy { Side::Buy } else { Side::Sell };
@@ -435,7 +472,7 @@ async fn client_read_loop(
                     reservation_token: reservation_token.clone(),
                     side,
                     operation: PendingOperation::Active,
-                    conn_id,  // Track which client owns this order
+                    conn_id, // Track which client owns this order
                 };
                 ctx.pending_orders
                     .write()
@@ -447,14 +484,17 @@ async fn client_read_loop(
                 // Note: We don't know the side (engine infers it), so keep the old side
                 if let Some((_, is_buy, _)) = pending_orders.get(&replace.order_id) {
                     let is_buy = *is_buy;
-                    pending_orders.insert(replace.order_id, (reservation_token.clone(), is_buy, PendingOperation::Active));
+                    pending_orders.insert(
+                        replace.order_id,
+                        (reservation_token.clone(), is_buy, PendingOperation::Active),
+                    );
 
                     let side = if is_buy { Side::Buy } else { Side::Sell };
                     let metadata = OrderMetadata {
                         reservation_token: reservation_token.clone(),
                         side,
                         operation: PendingOperation::Active,
-                        conn_id,  // Track which client owns this order
+                        conn_id, // Track which client owns this order
                     };
                     ctx.pending_orders
                         .write()
@@ -475,8 +515,12 @@ async fn client_read_loop(
 
         let gateway_msg = GatewayToEngine::execute(cmd.clone(), conn_id, risk_token);
 
-        tracing::debug!("📨 Routing command {:?} to engine for symbol_id={}, conn_id={}", 
-            cmd, symbol_id, conn_id);
+        tracing::debug!(
+            "📨 Routing command {:?} to engine for symbol_id={}, conn_id={}",
+            cmd,
+            symbol_id,
+            conn_id
+        );
 
         // Route to engine
         if let Err(e) = ctx
@@ -575,8 +619,11 @@ pub async fn handle_engine_responses(
                         // Update maker order account state
                         if let Some(ref metadata) = maker_metadata {
                             let is_buy = metadata.side == Side::Buy;
-                            ctx.account_manager
-                                .apply_fill(&event, &metadata.reservation_token, is_buy);
+                            ctx.account_manager.apply_fill(
+                                &event,
+                                &metadata.reservation_token,
+                                is_buy,
+                            );
 
                             // Remove from pending (assuming full fill for now)
                             ctx.pending_orders
@@ -588,8 +635,11 @@ pub async fn handle_engine_responses(
                         // Update taker order account state
                         if let Some(ref metadata) = taker_metadata {
                             let is_buy = metadata.side == Side::Buy;
-                            ctx.account_manager
-                                .apply_fill(&event, &metadata.reservation_token, is_buy);
+                            ctx.account_manager.apply_fill(
+                                &event,
+                                &metadata.reservation_token,
+                                is_buy,
+                            );
 
                             // Remove from pending (assuming full fill for now)
                             ctx.pending_orders
@@ -600,7 +650,7 @@ pub async fn handle_engine_responses(
 
                         // Send Fill to BOTH maker and taker clients
                         let clients = client_senders.read().await;
-                        
+
                         // Send to maker
                         if let Some(maker_meta) = maker_metadata {
                             if let Some(client_info) = clients.get(&maker_meta.conn_id) {
@@ -611,7 +661,7 @@ pub async fn handle_engine_responses(
                                 }
                             }
                         }
-                        
+
                         // Send to taker (conn_id from engine)
                         if let Some(client_info) = clients.get(&conn_id) {
                             let mut payload = bytes::BytesMut::with_capacity(256);
@@ -620,7 +670,7 @@ pub async fn handle_engine_responses(
                                 ctx.metrics.inc_frames_out();
                             }
                         }
-                        
+
                         // Skip the normal send logic below (return early)
                         continue;
                     }
@@ -669,14 +719,26 @@ pub async fn handle_engine_responses(
 
                 // Send event to client using their codec
                 let clients = client_senders.read().await;
-                tracing::debug!("📤 Routing event {:?} to conn_id={}, registry has {} clients", 
-                    event, conn_id, clients.len());
-                
+                tracing::debug!(
+                    "📤 Routing event {:?} to conn_id={}, registry has {} clients",
+                    event,
+                    conn_id,
+                    clients.len()
+                );
+
                 if let Some(client_info) = clients.get(&conn_id) {
-                    tracing::debug!("✅ Found client conn_id={} with codec={:?}", conn_id, client_info.codec.name());
+                    tracing::debug!(
+                        "✅ Found client conn_id={} with codec={:?}",
+                        conn_id,
+                        client_info.codec.name()
+                    );
                     let mut payload = bytes::BytesMut::with_capacity(256);
                     if client_info.codec.encode_event(&event, &mut payload).is_ok() {
-                        tracing::debug!("✅ Encoded event, sending {} bytes to conn_id={}", payload.len(), conn_id);
+                        tracing::debug!(
+                            "✅ Encoded event, sending {} bytes to conn_id={}",
+                            payload.len(),
+                            conn_id
+                        );
                         let _ = client_info.sender.send(payload.freeze()).await;
                         ctx.metrics.inc_frames_out();
                         tracing::debug!("✅ Sent event to conn_id={}", conn_id);
@@ -684,8 +746,11 @@ pub async fn handle_engine_responses(
                         warn!("❌ Failed to encode event for conn_id={}", conn_id);
                     }
                 } else {
-                    warn!("❌ No client found for conn_id={}, available conn_ids: {:?}", 
-                        conn_id, clients.keys().collect::<Vec<_>>());
+                    warn!(
+                        "❌ No client found for conn_id={}, available conn_ids: {:?}",
+                        conn_id,
+                        clients.keys().collect::<Vec<_>>()
+                    );
                 }
             }
             EngineToGateway::MarketData { symbol_id, event } => {
@@ -707,7 +772,10 @@ pub async fn handle_engine_responses(
             EngineToGateway::AllOrders(orders) => {
                 // Response to QueryAllOrders - for reconciliation
                 // TODO: This will be handled by reconciliation logic in Phase 3
-                tracing::debug!("Received {} orders from engine for reconciliation", orders.len());
+                tracing::debug!(
+                    "Received {} orders from engine for reconciliation",
+                    orders.len()
+                );
             }
             EngineToGateway::EngineReady { symbol_id, orders } => {
                 // Engine restarted and recovered from persistence

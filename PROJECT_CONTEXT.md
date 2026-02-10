@@ -365,13 +365,8 @@ high-perf-trading/
 │   │
 │   └── test_client/         # Simple test client
 │
-├── scripts/
-│   ├── start_engines.sh     # Launch engine servers
-│   ├── start_gateway.sh     # Launch gateway server
-│   └── run_benchmark.sh     # Run latency benchmarks
-│
 ├── engines.toml             # Engine configuration
-├── justfile                 # Task runner recipes
+├── justfile                 # Task runner recipes (replaces scripts/)
 ├── Cargo.toml               # Workspace manifest
 └── PROJECT_CONTEXT.md       # This file
 ```
@@ -428,24 +423,11 @@ just kill
 just clean-persistence
 ```
 
-#### Option 2: Using Scripts
-
-```bash
-# Terminal 1: Start engines
-./scripts/start_engines.sh
-
-# Terminal 2: Start gateway
-./scripts/start_gateway.sh
-
-# Logs are written to:
-#   engine1.log, engine2.log, gateway.log
-```
-
-#### Option 3: Manual
+#### Option 2: Manual
 
 ```bash
 # Create persistence directories
-mkdir -p engine1/snapshots engine2/snapshots gateway/snapshots
+mkdir -p journals snapshots
 
 # Start engine 1
 ./target/release/engine_server \
@@ -453,8 +435,8 @@ mkdir -p engine1/snapshots engine2/snapshots gateway/snapshots
   --symbol-name "BTC/USD" \
   --listen-addr 127.0.0.1:9100 \
   --admin-addr 127.0.0.1:9200 \
-  --journal-path engine1/journal.bin \
-  --snapshot-dir engine1/snapshots
+  --journal-path journals/engine1.bin \
+  --snapshot-dir snapshots
 
 # Start engine 2 (different terminal)
 ./target/release/engine_server \
@@ -462,16 +444,16 @@ mkdir -p engine1/snapshots engine2/snapshots gateway/snapshots
   --symbol-name "ETH/USD" \
   --listen-addr 127.0.0.1:9101 \
   --admin-addr 127.0.0.1:9201 \
-  --journal-path engine2/journal.bin \
-  --snapshot-dir engine2/snapshots
+  --journal-path journals/engine2.bin \
+  --snapshot-dir snapshots
 
 # Start gateway (different terminal)
 ./target/release/gateway_server \
   --client-binary-addr 0.0.0.0:9000 \
   --client-json-addr 0.0.0.0:9001 \
   --admin-addr 0.0.0.0:8080 \
-  --journal-path gateway/journal.bin \
-  --snapshot-dir gateway/snapshots \
+  --journal-path journals/gateway.bin \
+  --snapshot-dir snapshots \
   --engines-config engines.toml
 ```
 
@@ -514,13 +496,25 @@ cargo test -- --nocapture
 
 ### Smoke Tests
 
-```bash
-# Binary protocol (WORKING)
-just smoke-bin
-cargo run --release -p bench -- --mode smoke --bin-addr 127.0.0.1:9000
+All smoke tests use JSON protocol and verify end-to-end functionality:
 
-# JSON protocol (HANGS - see Known Issues)
-timeout 10 cargo run --release -p bench -- --mode smoke-match --json-addr 127.0.0.1:9001
+```bash
+# All smoke tests (recommended)
+just smoke              # Runs all tests below
+
+# Individual smoke tests
+just smoke-bin          # Binary protocol basic test
+just smoke-json         # JSON protocol basic test
+just smoke-match        # Order matching scenario
+just smoke-postonly     # POST_ONLY rejection
+just smoke-ioc          # IOC order behavior
+just smoke-cancel       # Cancel releases reservation
+just smoke-replace      # Replace adjusts reservation
+just smoke-risk         # Risk rejection (insufficient funds)
+
+# Or run directly
+cargo run --release -p bench -- --mode smoke-all --json-addr 127.0.0.1:9001
+cargo run --release -p bench -- --mode smoke-risk --json-addr 127.0.0.1:9001
 ```
 
 ### Performance Benchmarks
