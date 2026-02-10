@@ -76,6 +76,60 @@ snapshots/
 
 ---
 
+### 3. Cancel & Replace Not Integrated with Account State - FIXED ✅
+
+**Status:** RESOLVED (2026-02-10)
+
+**What Was Wrong:**
+The KNOWN_ISSUES document claimed that Cancel and Replace weren't integrated with account state management, but this was incorrect - the functionality was **already fully implemented and working**!
+
+**What's Actually Implemented:**
+- ✅ `release_reservation()` - Releases buying power when orders are cancelled
+- ✅ `adjust_reservation()` - Atomically adjusts reservations for Replace
+- ✅ `PendingOperation::CancelPending` - Tracks cancel state for proper cleanup
+- ✅ Global order tracking with `OrderMetadata` 
+- ✅ Automatic cleanup on Reject events
+
+**Code Locations:**
+- `gateway_server/src/account_manager.rs` - Reservation methods
+- `gateway_server/src/client_handler.rs` - Cancel/Replace handling
+
+**Test Coverage:**
+```bash
+$ cargo test --bin gateway_server
+test account_manager::tests::test_release_reservation ... ok
+test account_manager::tests::test_cancel_releases_reservation ... ok
+test account_manager::tests::test_replace_adjust_reservation ... ok
+test account_manager::tests::test_replace_insufficient_funds ... ok
+test account_manager::tests::test_replace_decrease_price ... ok
+test account_manager::tests::test_multiple_orders_with_cancel ... ok
+
+test result: ok. 27 passed; 0 failed
+```
+
+**Integration Test:**
+Created `test_cancel_replace.py` that verifies:
+1. Cancel releases reservations (funds become available again)
+2. Replace adjusts reservations atomically (no double-spend)
+3. Account state is correctly maintained across operations
+
+**Logs Confirm:**
+```
+DEBUG gateway_server::client_handler: Released reservation for cancelled order_id=7001
+DEBUG gateway_server::client_handler: Released reservation for cancelled order_id=7003
+```
+
+**How It Works:**
+1. **NewOrder** - Reserves buying power, stores `ReservationToken`
+2. **Cancel** - Marks order as `CancelPending`, sends to engine
+3. **CancelAck** - Calls `release_reservation()`, removes from tracking
+4. **Replace** - Calls `adjust_reservation()` (atomic release + reserve)
+5. **Reject** - Always releases reservation on failure
+
+This issue was actually **already fixed** - the documentation just hadn't been updated!
+
+---
+
 ## 🔴 Critical Issues
 
 _No critical issues at this time!_ 🎉
@@ -84,69 +138,7 @@ _No critical issues at this time!_ 🎉
 
 ## 🟡 Medium Priority Issues
 
-### 2. Cancel & Replace Not Integrated with Account State
-
-**Severity:** Medium  
-**Status:** Feature incomplete  
-**Affects:** Cancel and Replace order commands
-
-**What Works:**
-- Engine accepts Cancel/Replace commands ✅
-- Commands are journaled ✅
-- Orders are removed/modified in order book ✅
-
-**What Doesn't Work:**
-- Gateway doesn't release tentative reservations on cancel ❌
-- Gateway doesn't adjust reservations on replace ❌
-- No `order_id → ReservationToken` mapping ❌
-
-**Impact:**
-- Canceled orders leave buying power locked forever
-- User can't cancel $50k order and place $50k order elsewhere
-- Reservation leak accumulates over time
-
-**Example Failure:**
-```
-Account has $100k buying power
-1. Place $50k buy order → tentative_reserved = $50k
-2. Cancel order → tentative_reserved STILL $50k (bug!)
-3. Try to place another $50k order → REJECTED (only $50k available)
-
-Expected: Step 2 should release reservation, making $100k available again
-```
-
-**Fix Required:**
-```rust
-// In AccountManager
-struct PendingOrders {
-    orders: HashMap<OrderId, ReservationToken>,
-}
-
-impl AccountManager {
-    pub fn release_reservation(&self, order_id: u64) -> Result<()> {
-        // Find reservation by order_id
-        // Lock account
-        // Subtract from tentative_reserved
-        // Remove from pending_orders map
-    }
-    
-    pub fn adjust_reservation(&self, order_id: u64, new_amount: i64) -> Result<()> {
-        // Find old reservation
-        // Calculate delta
-        // Check if affordable
-        // Update tentative_reserved
-    }
-}
-```
-
-**Workaround:**
-Don't use Cancel or Replace commands. Only use NewOrder.
-
-**Fix Priority:** MEDIUM - Needed for production
-
----
-
-### 3. Gateway Admin Endpoint Not Always Available
+### Gateway Admin Endpoint Not Always Available
 
 **Severity:** Low  
 **Status:** Configuration issue  
