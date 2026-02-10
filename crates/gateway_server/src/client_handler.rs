@@ -29,11 +29,22 @@ use crate::engine_router::EngineRouter;
 
 const WRITE_BUF_SIZE: usize = 1024;
 
+/// Track what operation is pending for an order
+#[derive(Clone, Debug)]
+pub enum PendingOperation {
+    /// Order is resting in book, has active reservation
+    Active,
+    /// Cancel sent, waiting for ack to release reservation
+    CancelPending,
+}
+
 /// Order metadata for tracking fills
 #[derive(Clone, Debug)]
 pub struct OrderMetadata {
     pub reservation_token: ReservationToken,
     pub side: Side,
+    pub operation: PendingOperation,
+    pub conn_id: u64,  // Which client connection owns this order
 }
 
 /// Client connection info for routing responses
@@ -94,6 +105,7 @@ pub async fn handle_client_connection(
             codec: codec.clone(),
         };
         senders.insert(conn_id, client_info);
+        info!("✅ Registered client conn_id={} in registry (codec={:?})", conn_id, codec.name());
     }
 
     // Spawn write loop
@@ -147,8 +159,8 @@ async fn client_read_loop(
     out_tx: mpsc::Sender<Bytes>,
     ctx: Arc<GatewayContext>,
 ) -> Result<()> {
-    // Track pending orders: order_id -> (reservation_token, is_buy)
-    let mut pending_orders: HashMap<u64, (ReservationToken, bool)> = HashMap::new();
+    // Track pending orders: order_id -> (reservation_token, is_buy, operation)
+    let mut pending_orders: HashMap<u64, (ReservationToken, bool, PendingOperation)> = HashMap::new();
 
     while let Some(frame_result) = read_half.next().await {
         let frame = frame_result.context("read frame failed")?;
@@ -272,54 +284,185 @@ async fn client_read_loop(
             false
         };
 
-        // Do risk check and get reservation token
-        let reservation_token = match ctx.account_manager.check_and_reserve(&cmd) {
-            Ok(token) => token,
-            Err(err) => {
-                // Risk check failed - send reject to client
-                warn!("Risk check failed for conn_id={}: {:?}", conn_id, err);
+        // Special handling for Cancel: mark order as CancelPending
+        if let Command::Cancel(cancel) = &cmd {
+            // Mark order as cancel pending so we can release reservation when ack arrives
+            if let Some((token, is_buy, _)) = pending_orders.get(&cancel.order_id) {
+                pending_orders.insert(cancel.order_id, (token.clone(), *is_buy, PendingOperation::CancelPending));
+            }
+            
+            // Also update global tracking
+            if let Some(metadata) = ctx.pending_orders.write().await.get_mut(&cancel.order_id) {
+                metadata.operation = PendingOperation::CancelPending;
+            }
+            
+            let gateway_seq = ctx.account_manager.next_seq();
+            let risk_token = common::RiskToken {
+                account_id: cancel.account_id,
+                reserved_amount: 0,
+                gateway_seq,
+            };
 
-                // Get client_seq and order_id for the reject message
-                let (client_seq, order_id) = match &cmd {
-                    Command::NewOrder(order) => (order.client_seq, Some(order.order_id)),
-                    Command::Cancel(cancel) => (cancel.client_seq, Some(cancel.order_id)),
-                    Command::Replace(replace) => (replace.client_seq, Some(replace.order_id)),
-                    _ => (0, None),
-                };
+            let gateway_msg = GatewayToEngine::execute(cmd.clone(), conn_id, risk_token);
 
-                // Create reject event
+            if let Err(e) = ctx.engine_router.route_to_engine(&gateway_msg, symbol_id).await {
+                warn!("Failed to route Cancel to engine for symbol_id={}: {}", symbol_id, e);
+                
+                // Restore order to Active state since cancel failed
+                if let Some((token, is_buy, _)) = pending_orders.get(&cancel.order_id) {
+                    pending_orders.insert(cancel.order_id, (token.clone(), *is_buy, PendingOperation::Active));
+                }
+                
+                // Also restore in global tracking
+                if let Some(metadata) = ctx.pending_orders.write().await.get_mut(&cancel.order_id) {
+                    metadata.operation = PendingOperation::Active;
+                }
+                
                 let reject = Event::Reject(common::Reject {
                     server_seq: ctx.account_manager.next_seq(),
-                    client_seq,
-                    order_id,
-                    reason: common::RejectReason::Risk,
+                    client_seq: cancel.client_seq,
+                    order_id: Some(cancel.order_id),
+                    reason: common::RejectReason::Overloaded,
                 });
 
-                // Send reject to client
                 let mut reject_payload = bytes::BytesMut::with_capacity(256);
                 if codec.encode_event(&reject, &mut reject_payload).is_ok() {
                     let _ = out_tx.send(reject_payload.freeze()).await;
                     ctx.metrics.inc_frames_out();
                 }
+            }
 
-                continue;
+            continue;
+        }
+
+        // Special handling for Replace: adjust existing reservation
+        let reservation_token = if let Command::Replace(replace) = &cmd {
+            // Look up old reservation for this order_id
+            let old_token = {
+                let pending = ctx.pending_orders.read().await;
+                pending.get(&replace.order_id)
+                    .map(|metadata| metadata.reservation_token.clone())
+            };
+
+            match old_token {
+                Some(old_token) => {
+                    // Atomically adjust reservation (release old, reserve new)
+                    match ctx.account_manager.adjust_reservation(&old_token, replace) {
+                        Ok(new_token) => new_token,
+                        Err(err) => {
+                            // Risk check failed for replace
+                            warn!("Replace risk check failed for conn_id={}: {:?}", conn_id, err);
+
+                            let reject = Event::Reject(common::Reject {
+                                server_seq: ctx.account_manager.next_seq(),
+                                client_seq: replace.client_seq,
+                                order_id: Some(replace.order_id),
+                                reason: common::RejectReason::Risk,
+                            });
+
+                            let mut reject_payload = bytes::BytesMut::with_capacity(256);
+                            if codec.encode_event(&reject, &mut reject_payload).is_ok() {
+                                let _ = out_tx.send(reject_payload.freeze()).await;
+                                ctx.metrics.inc_frames_out();
+                            }
+
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    // Order not found in pending orders - reject
+                    warn!("Replace failed: order_id={} not found in pending orders", replace.order_id);
+
+                    let reject = Event::Reject(common::Reject {
+                        server_seq: ctx.account_manager.next_seq(),
+                        client_seq: replace.client_seq,
+                        order_id: Some(replace.order_id),
+                        reason: common::RejectReason::NotFound,
+                    });
+
+                    let mut reject_payload = bytes::BytesMut::with_capacity(256);
+                    if codec.encode_event(&reject, &mut reject_payload).is_ok() {
+                        let _ = out_tx.send(reject_payload.freeze()).await;
+                        ctx.metrics.inc_frames_out();
+                    }
+
+                    continue;
+                }
+            }
+        } else {
+            // Do risk check and get reservation token for NewOrder
+            match ctx.account_manager.check_and_reserve(&cmd) {
+            Ok(token) => token,
+                Err(err) => {
+                    // Risk check failed - send reject to client
+                    warn!("Risk check failed for conn_id={}: {:?}", conn_id, err);
+
+                    // Get client_seq and order_id for the reject message
+                    let (client_seq, order_id) = match &cmd {
+                        Command::NewOrder(order) => (order.client_seq, Some(order.order_id)),
+                        _ => (0, None),
+                    };
+
+                    // Create reject event
+                    let reject = Event::Reject(common::Reject {
+                        server_seq: ctx.account_manager.next_seq(),
+                        client_seq,
+                        order_id,
+                        reason: common::RejectReason::Risk,
+                    });
+
+                    // Send reject to client
+                    let mut reject_payload = bytes::BytesMut::with_capacity(256);
+                    if codec.encode_event(&reject, &mut reject_payload).is_ok() {
+                        let _ = out_tx.send(reject_payload.freeze()).await;
+                        ctx.metrics.inc_frames_out();
+                    }
+
+                    continue;
+                }
             }
         };
 
         // Track pending order (both locally and globally)
-        if let Command::NewOrder(order) = &cmd {
-            pending_orders.insert(order.order_id, (reservation_token.clone(), is_buy));
+        match &cmd {
+            Command::NewOrder(order) => {
+                pending_orders.insert(order.order_id, (reservation_token.clone(), is_buy, PendingOperation::Active));
 
-            // Also store in global tracking for handle_engine_responses
-            let side = if is_buy { Side::Buy } else { Side::Sell };
-            let metadata = OrderMetadata {
-                reservation_token: reservation_token.clone(),
-                side,
-            };
-            ctx.pending_orders
-                .write()
-                .await
-                .insert(order.order_id, metadata);
+                // Also store in global tracking for handle_engine_responses
+                let side = if is_buy { Side::Buy } else { Side::Sell };
+                let metadata = OrderMetadata {
+                    reservation_token: reservation_token.clone(),
+                    side,
+                    operation: PendingOperation::Active,
+                    conn_id,  // Track which client owns this order
+                };
+                ctx.pending_orders
+                    .write()
+                    .await
+                    .insert(order.order_id, metadata);
+            }
+            Command::Replace(replace) => {
+                // Update the pending order with new reservation
+                // Note: We don't know the side (engine infers it), so keep the old side
+                if let Some((_, is_buy, _)) = pending_orders.get(&replace.order_id) {
+                    let is_buy = *is_buy;
+                    pending_orders.insert(replace.order_id, (reservation_token.clone(), is_buy, PendingOperation::Active));
+
+                    let side = if is_buy { Side::Buy } else { Side::Sell };
+                    let metadata = OrderMetadata {
+                        reservation_token: reservation_token.clone(),
+                        side,
+                        operation: PendingOperation::Active,
+                        conn_id,  // Track which client owns this order
+                    };
+                    ctx.pending_orders
+                        .write()
+                        .await
+                        .insert(replace.order_id, metadata);
+                }
+            }
+            _ => {}
         }
 
         // Create gateway message with risk approval
@@ -331,6 +474,9 @@ async fn client_read_loop(
         };
 
         let gateway_msg = GatewayToEngine::execute(cmd.clone(), conn_id, risk_token);
+
+        tracing::debug!("📨 Routing command {:?} to engine for symbol_id={}, conn_id={}", 
+            cmd, symbol_id, conn_id);
 
         // Route to engine
         if let Err(e) = ctx
@@ -414,54 +560,132 @@ pub async fn handle_engine_responses(
                 event,
                 risk_token: _,
             } => {
-                // Update account manager if this is a fill
-                if let Event::Fill(ref fill) = &event {
-                    // Handle BOTH maker and taker fills for account updates
-                    // First, collect the metadata we need while holding read lock
-                    let (maker_metadata, taker_metadata) = {
-                        let pending_orders = ctx.pending_orders.read().await;
-                        let maker = pending_orders.get(&fill.maker_order_id).cloned();
-                        let taker = pending_orders.get(&fill.taker_order_id).cloned();
-                        (maker, taker)
-                    }; // Read lock released
+                // Handle different event types for account state updates
+                match &event {
+                    Event::Fill(ref fill) => {
+                        // Handle BOTH maker and taker fills for account updates
+                        // Collect metadata for both orders while holding read lock
+                        let (maker_metadata, taker_metadata) = {
+                            let pending_orders = ctx.pending_orders.read().await;
+                            let maker = pending_orders.get(&fill.maker_order_id).cloned();
+                            let taker = pending_orders.get(&fill.taker_order_id).cloned();
+                            (maker, taker)
+                        }; // Read lock released
 
-                    // Update maker order account state
-                    if let Some(metadata) = maker_metadata {
-                        let is_buy = metadata.side == Side::Buy;
-                        ctx.account_manager
-                            .apply_fill(&event, &metadata.reservation_token, is_buy);
+                        // Update maker order account state
+                        if let Some(ref metadata) = maker_metadata {
+                            let is_buy = metadata.side == Side::Buy;
+                            ctx.account_manager
+                                .apply_fill(&event, &metadata.reservation_token, is_buy);
 
-                        // Remove from pending (assuming full fill for now)
-                        ctx.pending_orders
-                            .write()
-                            .await
-                            .remove(&fill.maker_order_id);
+                            // Remove from pending (assuming full fill for now)
+                            ctx.pending_orders
+                                .write()
+                                .await
+                                .remove(&fill.maker_order_id);
+                        }
+
+                        // Update taker order account state
+                        if let Some(ref metadata) = taker_metadata {
+                            let is_buy = metadata.side == Side::Buy;
+                            ctx.account_manager
+                                .apply_fill(&event, &metadata.reservation_token, is_buy);
+
+                            // Remove from pending (assuming full fill for now)
+                            ctx.pending_orders
+                                .write()
+                                .await
+                                .remove(&fill.taker_order_id);
+                        }
+
+                        // Send Fill to BOTH maker and taker clients
+                        let clients = client_senders.read().await;
+                        
+                        // Send to maker
+                        if let Some(maker_meta) = maker_metadata {
+                            if let Some(client_info) = clients.get(&maker_meta.conn_id) {
+                                let mut payload = bytes::BytesMut::with_capacity(256);
+                                if client_info.codec.encode_event(&event, &mut payload).is_ok() {
+                                    let _ = client_info.sender.send(payload.freeze()).await;
+                                    ctx.metrics.inc_frames_out();
+                                }
+                            }
+                        }
+                        
+                        // Send to taker (conn_id from engine)
+                        if let Some(client_info) = clients.get(&conn_id) {
+                            let mut payload = bytes::BytesMut::with_capacity(256);
+                            if client_info.codec.encode_event(&event, &mut payload).is_ok() {
+                                let _ = client_info.sender.send(payload.freeze()).await;
+                                ctx.metrics.inc_frames_out();
+                            }
+                        }
+                        
+                        // Skip the normal send logic below (return early)
+                        continue;
                     }
-
-                    // Update taker order account state
-                    if let Some(metadata) = taker_metadata {
-                        let is_buy = metadata.side == Side::Buy;
-                        ctx.account_manager
-                            .apply_fill(&event, &metadata.reservation_token, is_buy);
-
-                        // Remove from pending (assuming full fill for now)
-                        ctx.pending_orders
-                            .write()
-                            .await
-                            .remove(&fill.taker_order_id);
+                    Event::Ack(ref ack) => {
+                        // Check if this is a CancelAck by looking at the operation state
+                        let mut pending = ctx.pending_orders.write().await;
+                        if let Some(metadata) = pending.get(&ack.order_id) {
+                            match metadata.operation {
+                                PendingOperation::CancelPending => {
+                                    // This is a CancelAck - release reservation and remove order
+                                    let metadata = pending.remove(&ack.order_id).unwrap();
+                                    ctx.account_manager
+                                        .release_reservation(&metadata.reservation_token);
+                                    tracing::debug!(
+                                        "Released reservation for cancelled order_id={}",
+                                        ack.order_id
+                                    );
+                                }
+                                PendingOperation::Active => {
+                                    // This is a NewOrder or Replace Ack - order stays in pending
+                                    // until it's filled or cancelled
+                                }
+                            }
+                        }
+                    }
+                    Event::Reject(ref reject) => {
+                        // Release reservation if order was rejected
+                        if let Some(order_id) = reject.order_id {
+                            let metadata = ctx.pending_orders.write().await.remove(&order_id);
+                            if let Some(metadata) = metadata {
+                                // Release the reservation
+                                ctx.account_manager
+                                    .release_reservation(&metadata.reservation_token);
+                                tracing::debug!(
+                                    "Released reservation for rejected order_id={}",
+                                    order_id
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        // Other events (BookTop, AccountState, AuthSuccess, AuthFailure)
+                        // don't require account state updates
                     }
                 }
 
                 // Send event to client using their codec
                 let clients = client_senders.read().await;
+                tracing::debug!("📤 Routing event {:?} to conn_id={}, registry has {} clients", 
+                    event, conn_id, clients.len());
+                
                 if let Some(client_info) = clients.get(&conn_id) {
+                    tracing::debug!("✅ Found client conn_id={} with codec={:?}", conn_id, client_info.codec.name());
                     let mut payload = bytes::BytesMut::with_capacity(256);
                     if client_info.codec.encode_event(&event, &mut payload).is_ok() {
+                        tracing::debug!("✅ Encoded event, sending {} bytes to conn_id={}", payload.len(), conn_id);
                         let _ = client_info.sender.send(payload.freeze()).await;
                         ctx.metrics.inc_frames_out();
+                        tracing::debug!("✅ Sent event to conn_id={}", conn_id);
+                    } else {
+                        warn!("❌ Failed to encode event for conn_id={}", conn_id);
                     }
                 } else {
-                    warn!("No client found for conn_id={}", conn_id);
+                    warn!("❌ No client found for conn_id={}, available conn_ids: {:?}", 
+                        conn_id, clients.keys().collect::<Vec<_>>());
                 }
             }
             EngineToGateway::MarketData { symbol_id, event } => {
@@ -478,6 +702,20 @@ pub async fn handle_engine_responses(
                     "Engine health: symbol_id={}, orders_in_book={}",
                     symbol_id,
                     orders_in_book
+                );
+            }
+            EngineToGateway::AllOrders(orders) => {
+                // Response to QueryAllOrders - for reconciliation
+                // TODO: This will be handled by reconciliation logic in Phase 3
+                tracing::debug!("Received {} orders from engine for reconciliation", orders.len());
+            }
+            EngineToGateway::EngineReady { symbol_id, orders } => {
+                // Engine restarted and recovered from persistence
+                // TODO: This will trigger reconciliation to detect ghost orders in Phase 4
+                tracing::warn!(
+                    "Engine {} restarted with {} orders (reconciliation not yet implemented)",
+                    symbol_id,
+                    orders.len()
                 );
             }
         }

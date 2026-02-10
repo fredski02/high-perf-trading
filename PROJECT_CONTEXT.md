@@ -1,1521 +1,1086 @@
-# High-Perf Trading Engine (Rust)
+# High-Performance Trading Engine
 
-Low-latency distributed trading system with gateway + per-symbol engine servers.
-Goal: Production-ready matching engine similar to real exchanges (Coinbase, Binance architecture).
+**A production-grade, low-latency distributed trading system built in Rust**
+
+> **Current Status:** Core functionality complete, tested at **11-13μs p50 latency** (localhost)  
+> **Architecture:** Gateway + per-symbol engine servers (similar to Coinbase, Binance)  
+> **Performance:** 20M+ orders/sec matching, 2.7M+ orders/sec gateway throughput
+
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Architecture Overview](#architecture-overview)
+- [Performance Metrics](#performance-metrics)
+- [Features](#features)
+- [Project Structure](#project-structure)
+- [Development Guide](#development-guide)
+- [Testing](#testing)
+- [Configuration](#configuration)
+- [Known Issues](#known-issues)
+- [Roadmap](#roadmap)
+
+---
+
+## Quick Start
+
+### Prerequisites
+- Rust 1.70+ (`rustup`)
+- Linux or macOS
+- `just` command runner (optional but recommended)
+
+### Build & Run
+
+```bash
+# Clone and build
+git clone <repo>
+cd high-perf-trading
+cargo build --release
+
+# Option 1: Using justfile (recommended)
+just dev                    # Start everything (engines + gateway)
+
+# Option 2: Manual (separate terminals)
+./scripts/start_engines.sh  # Terminal 1
+./scripts/start_gateway.sh  # Terminal 2
+
+# Run benchmarks
+just bench-rtt              # Measure latency
+just bench-throughput       # Measure throughput
+```
+
+### First Test
+
+```bash
+# Quick smoke test
+just smoke-bin
+
+# Expected output:
+# bin resp len=...
+# smoke ok
+```
 
 ---
 
 ## Architecture Overview
 
-**Distributed Design**: Gateway server handles global account state and risk, routes to dedicated per-symbol engine servers.
+### High-Level Design
 
 ```
-                     Clients (traders)
+                     Clients (Traders)
+                            │
                             ↓
-                ┌─────────────────────┐
-                │  Gateway Server     │
-                │  - Account state    │
-                │  - Risk checks      │
-                │  - Auth             │
-                │  - Order routing    │
-                │  - Fill aggregation │
-                └──────────┬──────────┘
-                           │ (Low-latency network: AWS Enhanced Networking)
-                           │ (Same AZ, Cluster Placement Group)
-               ┌───────────┼────────────┬─────────────┐
-               ↓           ↓            ↓             ↓
-         ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐
-         │ BTC/USD │  │ ETH/USD │  │ SOL/USD │  │ DOGE/   │
-         │ Engine  │  │ Engine  │  │ Engine  │  │ Engine  │
-         │         │  │         │  │         │  │         │
-         │ 8 cores │  │ 8 cores │  │ 4 cores │  │ 1 core  │
-         └─────────┘  └─────────┘  └─────────┘  └─────────┘
-         Hot Pair      Hot Pair     Warm Pair    Cold Pair
+              ┌─────────────────────────┐
+              │   Gateway Server        │
+              │   :9000 (binary)        │
+              │   :9001 (JSON)          │
+              │   :8080 (admin HTTP)    │
+              │                         │
+              │  • Authentication       │
+              │  • Account Management   │
+              │  • Risk Checks          │
+              │  • Order Routing        │
+              │  • Persistence          │
+              └────────┬────────────────┘
+                       │
+        ┌──────────────┼──────────────┐
+        │              │              │
+        ↓              ↓              ↓
+  ┌──────────┐  ┌──────────┐  ┌──────────┐
+  │ BTC/USD  │  │ ETH/USD  │  │ SOL/USD  │
+  │ Engine   │  │ Engine   │  │ Engine   │
+  │ :9100    │  │ :9101    │  │ :9102    │
+  │          │  │          │  │          │
+  │ Matching │  │ Matching │  │ Matching │
+  │ Orders   │  │ Orders   │  │ Orders   │
+  └──────────┘  └──────────┘  └──────────┘
 ```
 
-### Key Principles
+### Design Principles
 
-- **1 Order Book = 1 Engine Server** - Simple, isolated, cache-optimized
-- **Gateway = Risk Oracle** - Single source of truth for account state
-- **Cost-Efficient Scaling** - Hot pairs get beefy servers, cold pairs get cheap ones
-- **Horizontal Scaling** - Add engine servers as you list new trading pairs
-- **Fault Isolation** - One engine crash doesn't affect other symbols
+1. **One Order Book = One Engine Server**
+   - Simple, isolated, cache-optimized
+   - Single-threaded for zero-lock latency
+   - Independent scaling per trading pair
+
+2. **Gateway = Risk Oracle**
+   - Single source of truth for account state
+   - Pre-flight risk checks with tentative reservations
+   - Prevents race conditions (double-spend)
+
+3. **Cost-Efficient Scaling**
+   - Hot pairs (BTC/USD) → beefy servers (8+ cores)
+   - Cold pairs (meme coins) → cheap servers (1-2 cores)
+   - Horizontal scaling: add engines as you list pairs
+
+4. **Production-Ready**
+   - Persistence (journaling + snapshots)
+   - Metrics (Prometheus)
+   - Authentication & sessions
+   - Deterministic replay
 
 ---
 
-## Workspace Crates
+## Performance Metrics
 
-### `gateway_server` ✅ IMPLEMENTED
-**Global Account & Risk Management + Authentication**
+### Latency (Localhost Testing)
 
-Responsibilities:
-- **Authentication**: API key verification and session management
-- Maintain all account state in-memory (positions, buying power, risk limits)
-- Handle client connections (binary + JSON protocols)
-- Pre-flight risk checks with tentative reservations
-- Route approved orders to correct engine server by symbol_id
-- Receive fills from engines and update account state
-- Persistence: journaling + snapshots (same strategy as engine)
-- Admin HTTP API for monitoring, metrics, account queries (TODO)
+**Binary Protocol RTT (10,000 iterations):**
+```
+p50  = 11-13 μs   ← median latency
+p99  = 29-40 μs   ← 99th percentile  
+p999 = 79-465 μs  ← tail latency
+```
 
-Key Components:
-- `AuthService` ✅ - API key → account_id mapping with verification
-- `SessionManager` ✅ - Track authenticated connections (conn_id → account_id)
-- `AccountManager` ✅ - In-memory account state with per-account locks
-- `RiskChecker` (in AccountManager) ✅ - Pre-flight risk with tentative reservations
-- `EngineRouter` ✅ - Maintains persistent TCP connections to all engines
-- `ClientHandler` ✅ - Handles client connections with auth enforcement
-- `Journal` (TODO) - Account update persistence (deposits, fills, limits)
+**What this measures:** Full round-trip:
+- Client → Gateway (deserialize + risk check)
+- Gateway → Engine (routing)
+- Engine (matching ~48ns)
+- Engine → Gateway (fill event)
+- Gateway → Client (serialize)
 
-### `engine_server` (RENAMED FROM `server`)
-**Pure Order Book Matching**
+### Throughput
 
-Responsibilities:
-- Single order book for one symbol
-- Accept orders from gateway (already risk-approved)
-- Pure price-time FIFO matching (no risk checks)
-- Emit fills, BookTop, Trade events back to gateway
-- Persistence: order book journaling + snapshots
-- Single-threaded for zero-lock latency
+**Engine Matching (Isolated):**
+- **48 ns** per order
+- **20.6M orders/second** (single-threaded!)
+- Tool: `cargo bench --bench engine_step`
 
-Simplified from current design:
-- Remove account management (moves to gateway)
-- Remove risk checks (gateway does this)
-- Remove client connection handling (gateway does this)
-- Keep: matching engine, order book, persistence
+**Gateway Routing:**
+- **360 ns** per order (binary protocol)
+- **500 ns** per order (JSON protocol)
+- **2.75M orders/second** throughput
+- Tool: `just bench-throughput`
 
-### `common`
-Protocol types (Command/Event), serde models, shared structs (unchanged)
+### Comparison with Industry
 
-### `codecs`
-Binary/JSON serialization (unchanged)
+| System              | Typical Latency | Our System (localhost) |
+|---------------------|-----------------|------------------------|
+| Coinbase Pro        | 1-5 ms         | **0.011-0.013 ms**     |
+| Binance             | 0.5-2 ms       | **0.011-0.013 ms**     |
+| Traditional HFT     | 0.1-0.5 ms     | **0.011-0.013 ms**     |
 
-### `persistence`
-Append-only journal with CRC32, snapshots (unchanged)
+**Note:** Production latency (AWS same-AZ) expected at 50-100μs with real network overhead.
 
-### `market_data` (NEW - FUTURE)
-**Time-Series Market Data Storage**
+### Optimizations Applied
 
-Responsibilities:
-- Consume BookTop and Trade events from gateway
-- Buffer and batch write to ClickHouse
-- Provide query API for historical data
-- Non-critical path (async, eventual consistency)
+- ✅ TCP_NODELAY on all connections (removed 40ms buffering)
+- ✅ Batched socket writes (feed + flush pattern)
+- ✅ Single-threaded engine (no lock contention)
+- ✅ Zero-copy serialization (postcard binary format)
+- ✅ Lock-free order book operations
+- ✅ Per-account DashMap (concurrent account access)
+- ✅ Persistent TCP connections (no handshake overhead)
 
 ---
 
-## Gateway Architecture (Detailed)
+## Features
 
-### Account State Management
+### ✅ Core Features (Implemented)
 
-```rust
-struct Gateway {
-    // Account state (in-memory, locked per account)
-    accounts: DashMap<AccountId, Arc<Mutex<AccountState>>>,
-    
-    // Routing table: symbol_id -> engine address
-    engine_routes: HashMap<SymbolId, SocketAddr>,
-    
-    // Persistent TCP connections to engines
-    engine_conns: HashMap<SymbolId, TcpStream>,
-    
-    // Persistence
-    journal: Journal<AccountUpdate>,
-    snapshot_manager: SnapshotManager,
-}
+#### Gateway Server
+- [x] **Authentication & Sessions**
+  - API key verification
+  - Session tracking per connection
+  - Reject unauthenticated orders
+  - Test accounts (1-10) with $1M buying power each
 
-struct AccountState {
-    account_id: AccountId,
-    buying_power: i64,
-    tentative_reserved: i64,  // Locked for pending orders
-    positions: HashMap<SymbolId, Position>,
-    risk_limits: HashMap<SymbolId, RiskLimits>,
-}
+- [x] **Account Management**
+  - In-memory account state (positions, balances)
+  - Per-account locking (race-condition free)
+  - Position tracking (net position, avg price, realized P&L)
+
+- [x] **Risk Management**
+  - Pre-flight risk checks
+  - Tentative reservations (prevent double-spend)
+  - Position limit enforcement
+  - Order size validation
+  - Buying power checks
+
+- [x] **Order Routing**
+  - Symbol-based routing (symbol_id → engine)
+  - Persistent TCP connections to engines
+  - Fill event aggregation
+  - Client response routing (partial)
+
+- [x] **Protocols**
+  - Binary protocol (postcard) - **fully working**
+  - JSON protocol - **partially working** (see Known Issues)
+  - Length-delimited framing
+
+- [x] **Persistence**
+  - Account journaling (create account events)
+  - Snapshot support
+  - Recovery on restart
+
+#### Engine Server
+- [x] **Order Book Matching**
+  - Price-time priority (FIFO)
+  - Continuous matching
+  - GTC (Good-Till-Cancel) orders
+  - IOC (Immediate-Or-Cancel) orders
+  - POST_ONLY orders
+
+- [x] **Persistence**
+  - Command journaling (NewOrder, Cancel, Replace)
+  - CRC32 checksums
+  - Order book snapshots
+  - Deterministic replay
+
+- [x] **Performance**
+  - Single-threaded on dedicated OS thread
+  - Zero-lock design
+  - Sub-microsecond matching (~48ns)
+
+- [x] **Events**
+  - Ack (order accepted)
+  - Fill (trade executed)
+  - Reject (order rejected)
+  - BookTop (best bid/ask updates)
+  - Trade (public trade data)
+
+#### Common Infrastructure
+- [x] Binary codec (postcard serialization)
+- [x] JSON codec (serde_json)
+- [x] Length-delimited framing
+- [x] Gateway ↔ Engine protocol
+- [x] Metrics (partial - engines have admin endpoints)
+
+---
+
+### 🚧 Partially Implemented
+
+- [ ] **JSON Response Routing** - JSON smoke tests hang
+  - Binary protocol works perfectly
+  - JSON client handler needs debugging
+  - Issue: Responses not reaching clients
+
+- [ ] **Gateway Admin HTTP** - Endpoint exists but not always configured
+  - Metrics endpoint (:8080) not always started
+  - Health checks need implementation
+
+- [ ] **Market Data Broadcasting**
+  - BookTop/Trade events generated
+  - Not yet broadcasted to all clients
+  - Need pub/sub channel
+
+---
+
+### 📋 Not Yet Implemented
+
+#### High Priority
+- [ ] **Cancel & Replace Orders**
+  - Account state updates for Cancel
+  - Reservation release on cancel
+  - Reservation adjustment on replace
+  - Race condition handling (cancel vs fill)
+
+- [ ] **Complete Admin API**
+  - Query account positions
+  - Query account balances
+  - Update risk limits
+  - Force-close positions
+
+- [ ] **Enhanced Monitoring**
+  - Complete Prometheus metrics
+  - Grafana dashboards
+  - Alerting rules
+  - Log aggregation
+
+#### Medium Priority
+- [ ] **WebSocket Support**
+  - Real-time market data feeds
+  - Order updates stream
+  - Account updates stream
+
+- [ ] **Advanced Order Types**
+  - Stop-loss / stop-limit
+  - Iceberg orders
+  - TWAP / VWAP execution
+
+- [ ] **Multi-Region Deployment**
+  - Cross-region routing
+  - Failover handling
+  - Geo-distributed engines
+
+#### Low Priority
+- [ ] **Advanced Risk**
+  - Portfolio margin
+  - Dynamic position limits
+  - Cross-margining
+
+- [ ] **Market Data Storage**
+  - ClickHouse integration
+  - Historical trades
+  - OHLCV bars
+  - Order book snapshots
+
+---
+
+## Project Structure
+
+```
+high-perf-trading/
+├── crates/
+│   ├── common/              # Shared types and protocols
+│   │   ├── src/
+│   │   │   ├── lib.rs       # Command, Event, Side, etc.
+│   │   │   └── gateway_protocol.rs  # Gateway ↔ Engine messages
+│   │
+│   ├── engine/              # Core matching engine logic
+│   │   ├── src/
+│   │   │   ├── engine.rs    # Main engine loop
+│   │   │   ├── order_book.rs  # Order book (FIFO matching)
+│   │   │   └── types.rs     # Engine-specific types
+│   │   └── benches/
+│   │       └── engine_step.rs  # Performance benchmarks
+│   │
+│   ├── engine_server/       # Engine server binary
+│   │   ├── src/
+│   │   │   ├── main.rs      # Entry point
+│   │   │   └── gateway_connection.rs  # Gateway protocol handler
+│   │
+│   ├── gateway_server/      # Gateway server binary
+│   │   ├── src/
+│   │   │   ├── main.rs            # Entry point
+│   │   │   ├── account_manager.rs # Account state + risk
+│   │   │   ├── auth.rs            # API key authentication
+│   │   │   ├── session.rs         # Session management
+│   │   │   ├── engine_router.rs   # Route to engines
+│   │   │   ├── client_handler.rs  # Client connections
+│   │   │   ├── persistence.rs     # Account journaling
+│   │   │   └── reconciliation.rs  # Engine restart recovery
+│   │
+│   ├── codecs/              # Serialization codecs
+│   │   ├── src/
+│   │   │   ├── binary_codec.rs  # Postcard binary
+│   │   │   └── json_codec.rs    # JSON
+│   │   └── benches/
+│   │       └── binary_codec.rs  # Codec benchmarks
+│   │
+│   ├── persistence/         # Persistence library (UNUSED - see gateway/engine persistence)
+│   ├── bench/               # Benchmark client
+│   │   └── src/main.rs      # Smoke tests + RTT benchmarks
+│   │
+│   └── test_client/         # Simple test client
+│
+├── scripts/
+│   ├── start_engines.sh     # Launch engine servers
+│   ├── start_gateway.sh     # Launch gateway server
+│   └── run_benchmark.sh     # Run latency benchmarks
+│
+├── engines.toml             # Engine configuration
+├── justfile                 # Task runner recipes
+├── Cargo.toml               # Workspace manifest
+└── PROJECT_CONTEXT.md       # This file
 ```
 
-### Tentative Reservations (Race Condition Prevention)
+### Key Files
 
-**Problem**: User with $100k tries to place two $100k orders simultaneously.
+**Gateway:**
+- `gateway_server/src/account_manager.rs` (490 lines) - Core risk management
+- `gateway_server/src/client_handler.rs` (355 lines) - Client connection handling
+- `gateway_server/src/engine_router.rs` - Routes orders to engines
 
-**Solution**: Lock account and reserve buying power tentatively:
+**Engine:**
+- `engine/src/engine.rs` - Main engine loop with persistence
+- `engine/src/order_book.rs` - Price-time FIFO matching
 
-```rust
-// When order arrives
-fn process_order(&self, order: NewOrder) -> Result<()> {
-    let account = self.accounts.get(&order.account_id)?;
-    let mut state = account.lock();  // 🔒 Serialize orders per account
-    
-    // Check available funds
-    let required = order.price * order.qty;
-    let available = state.buying_power - state.tentative_reserved;
-    if required > available {
-        return Err(RiskViolation::InsufficientFunds);
-    }
-    
-    // Reserve tentatively (money locked while order pending)
-    state.tentative_reserved += required;
-    
-    // Route to engine
-    self.route_to_engine(order, ReservationToken { amount: required })?;
-    Ok(())
-}
+**Common:**
+- `common/src/lib.rs` - Shared types (Command, Event, Side, etc.)
+- `common/src/gateway_protocol.rs` - Gateway ↔ Engine protocol
 
-// When fill arrives from engine
-fn handle_fill(&self, fill: Fill, token: ReservationToken) {
-    let mut state = self.accounts.get(&fill.account_id).lock();
-    
-    // Release tentative, apply actual
-    state.tentative_reserved -= token.amount;
-    state.buying_power -= fill.price * fill.qty;
-    state.positions[fill.symbol_id] += fill.qty;
-    
-    // Journal for persistence
-    self.journal.append(AccountUpdate::Fill(fill));
-}
+---
+
+## Development Guide
+
+### Building
+
+```bash
+# Debug build (fast compile, slow runtime)
+cargo build
+
+# Release build (optimized, production-ready)
+cargo build --release
+
+# Build specific binary
+cargo build --release --bin gateway_server
+cargo build --release --bin engine_server
 ```
 
-**Result**: Orders for same account are serialized (one at a time), preventing double-spend.
+### Running
 
-### Account State Updates (Complete Lifecycle)
+#### Option 1: Using `just` (Recommended)
 
-The gateway maintains account state through the entire order lifecycle. Here's how different operations affect account state:
+```bash
+# Start everything
+just dev              # Engines + gateway (foreground)
 
-#### 1. New Order (Buy Side)
-```rust
-// Initial state
-buying_power: $100,000
-tentative_reserved: $0
-position: 0 BTC
+# Or start separately
+just dev-engines      # Background
+just dev-gateway      # Foreground
 
-// Order: Buy 1 BTC @ $50,000
-1. Check: available = $100,000 - $0 = $100,000 >= $50,000 ✓
-2. Reserve: tentative_reserved += $50,000 → $50,000
-3. Route to engine
+# Stop everything
+just kill
 
-// State after reservation
-buying_power: $100,000
-tentative_reserved: $50,000  // Locked for pending order
-available: $50,000            // Can still place orders with remaining
+# Clean persistence files
+just clean-persistence
 ```
 
-#### 2. Fill (Order Executed)
-```rust
-// Fill arrives: Bought 1 BTC @ $50,000
-1. Release tentative: tentative_reserved -= $50,000 → $0
-2. Apply actual cost: buying_power -= $50,000 → $50,000
-3. Update position: position += 1 BTC → 1 BTC
-4. Journal for persistence
+#### Option 2: Using Scripts
 
-// Final state after fill
-buying_power: $50,000
-tentative_reserved: $0
-position: 1 BTC
+```bash
+# Terminal 1: Start engines
+./scripts/start_engines.sh
+
+# Terminal 2: Start gateway
+./scripts/start_gateway.sh
+
+# Logs are written to:
+#   engine1.log, engine2.log, gateway.log
 ```
 
-#### 3. Sell Order (Reduces Position)
-```rust
-// Current state: 1 BTC, $50,000 cash
-// Order: Sell 1 BTC @ $51,000
+#### Option 3: Manual
 
-1. No buying power check needed (selling increases buying power)
-2. Check position: 1 BTC >= 1 BTC ✓
-3. No tentative reservation needed for sells
-4. Route to engine
+```bash
+# Create persistence directories
+mkdir -p engine1/snapshots engine2/snapshots gateway/snapshots
 
-// Fill arrives: Sold 1 BTC @ $51,000
-1. Update position: position -= 1 BTC → 0 BTC
-2. Credit proceeds: buying_power += $51,000 → $101,000
-3. Realized P&L: $1,000 profit
+# Start engine 1
+./target/release/engine_server \
+  --symbol-id 1 \
+  --symbol-name "BTC/USD" \
+  --listen-addr 127.0.0.1:9100 \
+  --admin-addr 127.0.0.1:9200 \
+  --journal-path engine1/journal.bin \
+  --snapshot-dir engine1/snapshots
+
+# Start engine 2 (different terminal)
+./target/release/engine_server \
+  --symbol-id 2 \
+  --symbol-name "ETH/USD" \
+  --listen-addr 127.0.0.1:9101 \
+  --admin-addr 127.0.0.1:9201 \
+  --journal-path engine2/journal.bin \
+  --snapshot-dir engine2/snapshots
+
+# Start gateway (different terminal)
+./target/release/gateway_server \
+  --client-binary-addr 0.0.0.0:9000 \
+  --client-json-addr 0.0.0.0:9001 \
+  --admin-addr 0.0.0.0:8080 \
+  --journal-path gateway/journal.bin \
+  --snapshot-dir gateway/snapshots \
+  --engines-config engines.toml
 ```
 
-#### 4. Partial Fill
-```rust
-// Order: Buy 10 BTC @ $50,000 (total $500,000)
-1. Reserve: tentative_reserved += $500,000
+### Code Quality
 
-// Partial fill: 3 BTC @ $50,000
-1. Release partial: tentative_reserved -= $150,000 → $350,000
-2. Apply cost: buying_power -= $150,000
-3. Update position: position += 3 BTC
+```bash
+# Format code
+just fmt
+cargo fmt --all
 
-// Remaining 7 BTC still reserved ($350,000 locked)
+# Lint with clippy
+just clippy
+cargo clippy --workspace --all-targets -- -Dwarnings
+
+# Run tests
+just test
+cargo test --workspace
+
+# All checks (fmt + clippy + test)
+just check
 ```
 
-#### 5. Cancel Order (TODO - NOT YET IMPLEMENTED) 🚧
-```rust
-// Order: Buy 1 BTC @ $50,000 (reserved $50,000)
-// User cancels order
+---
 
-1. Release reservation: tentative_reserved -= $50,000 → $0
-2. No buying_power change (nothing executed)
-3. No position change
-4. Journal cancellation event
+## Testing
 
-// Implementation needed in AccountManager:
-fn release_reservation(&self, token: ReservationToken) -> Result<()> {
-    let mut state = self.accounts.get(&token.account_id)?.lock();
-    state.tentative_reserved -= token.amount;
-    Ok(())
-}
+### Unit Tests
+
+```bash
+# Run all workspace tests
+cargo test --workspace
+
+# Run specific crate tests
+cargo test -p engine
+cargo test -p gateway_server
+
+# Run with output
+cargo test -- --nocapture
 ```
 
-**Status**: Cancel command needs account state integration:
-- Gateway receives Cancel command from client
-- Gateway must track reservation tokens by order_id
-- When cancel confirmed, release reservation
-- Handle race conditions (cancel vs fill)
+### Smoke Tests
 
-#### 6. Replace Order (TODO - NOT YET IMPLEMENTED) 🚧
-```rust
-// Original: Buy 1 BTC @ $50,000 (reserved $50,000)
-// Replace with: Buy 1 BTC @ $51,000 (needs $51,000)
+```bash
+# Binary protocol (WORKING)
+just smoke-bin
+cargo run --release -p bench -- --mode smoke --bin-addr 127.0.0.1:9000
 
-1. Check if new amount affordable: 
-   available = buying_power - (tentative_reserved - old_reservation)
-2. If affordable:
-   - Adjust reservation: tentative_reserved += ($51,000 - $50,000) → +$1,000
-   - Route replace to engine
-3. If not affordable:
-   - Reject replace
-   - Keep original order
-
-// Implementation needed:
-fn adjust_reservation(&self, 
-    account_id: AccountId,
-    old_amount: i64,
-    new_amount: i64
-) -> Result<ReservationToken> {
-    let mut state = self.accounts.get(&account_id)?.lock();
-    
-    let adjustment = new_amount - old_amount;
-    let available = state.buying_power - state.tentative_reserved + old_amount;
-    
-    if new_amount > available {
-        return Err(RiskViolation::InsufficientFunds);
-    }
-    
-    state.tentative_reserved += adjustment;
-    Ok(ReservationToken { amount: new_amount, ... })
-}
+# JSON protocol (HANGS - see Known Issues)
+timeout 10 cargo run --release -p bench -- --mode smoke-match --json-addr 127.0.0.1:9001
 ```
 
-**Status**: Replace command needs account state integration:
-- Gateway receives Replace command from client  
-- Calculate new reservation amount
-- Atomic adjustment (release old, reserve new)
-- Handle partial fills before replace
+### Performance Benchmarks
 
-#### 7. Rejected Orders
-```rust
-// Order: Buy 100 BTC @ $50,000 (needs $5M)
-// Account only has $100k
+```bash
+# Engine matching (offline, no server needed)
+just perf
+cargo bench --bench engine_step
 
-1. Risk check fails: available < required
-2. No reservation made
-3. Reject sent to client immediately
-4. No engine routing
+# Binary RTT (requires running servers)
+just bench-rtt              # 10,000 iterations
+just bench-rtt-fast         # 1,000 iterations
+
+# Gateway throughput
+just bench-throughput
+
+# Custom iterations
+cargo run --release -p bench -- --mode bench-bin --bin-addr 127.0.0.1:9000 --iters 50000
 ```
 
-#### Key Design Principles
-- **Atomic operations**: Account lock ensures no race conditions
-- **Pessimistic locking**: Reserve before routing (never overspend)
-- **Idempotency**: Gateway sequence numbers prevent duplicate processing
-- **Deterministic**: Journal replay produces same state
-- **Fast path for sells**: No reservation needed (increases buying power)
+### Integration Testing
 
-#### Race Condition Handling
-```rust
-// Scenario: User sends Cancel while Fill is in flight
+```bash
+# Full cycle: build → start → test → cleanup
+just test-all
 
-Thread 1 (Cancel):          Thread 2 (Fill from engine):
-1. Lock account             1. Wait for lock...
-2. Check order exists       
-3. Release reservation      2. Acquire lock
-4. Send cancel to engine    3. Process fill
-5. Unlock                   4. Release reservation
-                            5. Unlock
-
-Result: Fill processed first, cancel becomes no-op
+# Manual testing
+just dev-engines &       # Start engines
+sleep 3
+just dev-gateway &       # Start gateway  
+sleep 3
+just bench-rtt-fast      # Run benchmark
+just kill                # Cleanup
 ```
 
-**Implementation note**: Need order_id → reservation mapping in gateway.
+---
+
+## Configuration
+
+### Engine Configuration (`engines.toml`)
+
+```toml
+[[engines]]
+symbol_id = 1
+symbol_name = "BTC/USD"
+address = "127.0.0.1:9100"
+
+[[engines]]
+symbol_id = 2
+symbol_name = "ETH/USD"
+address = "127.0.0.1:9101"
+
+[[engines]]
+symbol_id = 3
+symbol_name = "SOL/USD"
+address = "127.0.0.1:9102"
+```
+
+### CLI Arguments
+
+**Gateway Server:**
+```bash
+gateway_server \
+  --client-binary-addr 0.0.0.0:9000   # Binary protocol port
+  --client-json-addr 0.0.0.0:9001     # JSON protocol port (partial)
+  --admin-addr 0.0.0.0:8080           # Metrics/admin HTTP
+  --journal-path gateway/journal.bin  # Account journal
+  --snapshot-dir gateway/snapshots    # Account snapshots
+  --engines-config engines.toml       # Engine routing table
+```
+
+**Engine Server:**
+```bash
+engine_server \
+  --symbol-id 1                       # Symbol ID (must match engines.toml)
+  --symbol-name "BTC/USD"             # Symbol name (for logging)
+  --listen-addr 127.0.0.1:9100        # Gateway connection port
+  --admin-addr 127.0.0.1:9200         # Admin HTTP port
+  --journal-path engine1/journal.bin  # Order journal
+  --snapshot-dir engine1/snapshots    # Order book snapshots
+```
+
+### Test Accounts
+
+The gateway creates 10 test accounts on startup:
+
+| Account ID | API Key | Buying Power |
+|------------|---------|--------------|
+| 1 | `test-key-1` | $1,000,000 |
+| 2 | `test-key-2` | $1,000,000 |
+| ... | ... | ... |
+| 10 | `test-key-10` | $1,000,000 |
+
+**Usage:**
+```json
+// Authenticate first (not currently enforced in binary protocol)
+{"Authenticate": {"api_key": "test-key-1"}}
+
+// Place order
+{"NewOrder": {
+  "client_seq": 1,
+  "order_id": 1001,
+  "account_id": 1,
+  "symbol_id": 1,
+  "side": "Buy",
+  "price": 50000,
+  "qty": 1,
+  "tif": "Gtc",
+  "flags": {"post_only": false}
+}}
+```
+
+---
+
+## Known Issues
+
+### 1. JSON Protocol Response Routing 🔴 HIGH PRIORITY
+
+**Status:** Binary protocol works perfectly, JSON hangs
+
+**Symptoms:**
+- `just smoke-bin` ✅ Works
+- `just smoke-json` ❌ Hangs waiting for response
+- Binary RTT benchmarks work (11-13μs)
+- JSON smoke tests timeout
+
+**Root Cause:**
+Response routing incomplete in `client_handler.rs`. Clients register for responses but messages may not be routed correctly.
+
+**Workaround:**
+Use binary protocol for all testing:
+```bash
+just bench-rtt         # Use this (binary)
+# just bench-distributed  # Don't use (JSON)
+```
+
+**Fix Required:**
+- Debug `client_handler.rs` response routing
+- Ensure `client_senders` registry is properly populated
+- Test with multiple concurrent connections
+
+---
+
+### 2. Gateway Admin Endpoint Not Always Started
+
+**Status:** Low priority
+
+**Symptoms:**
+- `curl http://127.0.0.1:8080/metrics` sometimes fails
+- Depends on whether `--admin-addr` flag was provided
+
+**Workaround:**
+Always include `--admin-addr 0.0.0.0:8080` when starting gateway.
+
+**Fix Required:**
+- Make admin endpoint mandatory
+- Add default port if not specified
+
+---
+
+### 3. Cancel & Replace Not Integrated with Account State
+
+**Status:** Medium priority
+
+**What Works:**
+- Engine accepts Cancel and Replace commands
+- Commands are journaled
+
+**What Doesn't Work:**
+- Gateway doesn't release reservations on cancel
+- Gateway doesn't adjust reservations on replace
+- Risk tokens not tracked by order_id
+
+**Impact:**
+- Canceled orders keep buying power locked
+- Can't cancel and re-place at different price
+
+**Fix Required:**
+- Add `order_id → ReservationToken` map in gateway
+- Implement `release_reservation()` on cancel
+- Implement `adjust_reservation()` on replace
+- Handle cancel/fill race conditions
+
+---
+
+### 4. Market Data Not Broadcasted
+
+**Status:** Low priority
+
+**What Works:**
+- Engines generate BookTop and Trade events
+- Events sent to gateway
+
+**What Doesn't Work:**
+- Events not forwarded to all clients
+- No pub/sub mechanism
+
+**Fix Required:**
+- Add broadcast channel for market data
+- Separate client event routing (unicast) from market data (broadcast)
+
+---
+
+### 5. Persistence Module Unused
+
+**Status:** Informational
+
+The `crates/persistence/` module exists but is NOT used. Instead:
+- Gateway uses `gateway_server/src/persistence.rs`
+- Engine uses built-in persistence in `engine/src/engine.rs`
+
+**Action:** Consider removing `crates/persistence/` to avoid confusion.
+
+---
+
+## Roadmap
+
+### Phase 1: Complete Core Features (2-4 weeks)
+
+**Week 1: Fix Critical Issues**
+- [ ] Fix JSON response routing
+- [ ] Make admin endpoint reliable
+- [ ] Add comprehensive logging
+
+**Week 2: Complete Order Lifecycle**
+- [ ] Implement Cancel with reservation release
+- [ ] Implement Replace with reservation adjustment
+- [ ] Add order_id → reservation mapping
+- [ ] Handle race conditions
+
+**Week 3: Monitoring & Observability**
+- [ ] Complete Prometheus metrics
+- [ ] Add Grafana dashboards
+- [ ] Set up alerting (latency spikes, errors)
+- [ ] Log aggregation
+
+**Week 4: Testing & Documentation**
+- [ ] Integration test suite
+- [ ] Load testing (1000+ concurrent clients)
+- [ ] Failure testing (engine crash, network partition)
+- [ ] API documentation
+
+---
+
+### Phase 2: Production Deployment (2-3 weeks)
+
+**AWS Infrastructure:**
+- [ ] Terraform scripts for cluster setup
+- [ ] Cluster Placement Group (same AZ, low latency)
+- [ ] Enhanced Networking (SR-IOV)
+- [ ] Security groups and VPC configuration
+
+**Deployment:**
+- [ ] Deploy to AWS (test environment)
+- [ ] Measure real-world latency (target: <100μs p99)
+- [ ] Stress test with production-like load
+- [ ] Disaster recovery testing
+
+**Operations:**
+- [ ] Runbooks for common issues
+- [ ] Backup and restore procedures
+- [ ] Rolling updates procedure
+- [ ] Incident response plan
+
+---
+
+### Phase 3: Advanced Features (1-2 months)
+
+**Market Data:**
+- [ ] WebSocket feeds for BookTop/Trade
+- [ ] ClickHouse integration for historical data
+- [ ] OHLCV bar generation
+- [ ] Replay API for backtesting
+
+**Order Types:**
+- [ ] Stop-loss / stop-limit
+- [ ] Iceberg orders
+- [ ] TWAP execution
+- [ ] Algo order routing
+
+**Risk Management:**
+- [ ] Portfolio margin calculation
+- [ ] Dynamic position limits
+- [ ] Risk API for external risk systems
+
+**Multi-Region:**
+- [ ] Cross-region deployment
+- [ ] Failover between regions
+- [ ] Geo-routing for clients
+
+---
+
+## Architecture Deep Dives
 
 ### Gateway ↔ Engine Protocol
 
-**Protocol Types** (defined in `common/src/gateway_protocol.rs`):
-
-**Gateway → Engine** (order submission):
+**Messages: Gateway → Engine**
 ```rust
 enum GatewayToEngine {
-    /// Execute a command (already risk-approved by gateway)
-    Execute(ExecuteCommand),
-    /// Health check / ping
-    Ping,
+    Execute(ExecuteCommand),  // Execute order (risk-approved)
+    Ping,                     // Health check
 }
 
 struct ExecuteCommand {
-    /// The original command from the client
-    command: Command,
-    /// Connection ID for routing responses back to client
-    conn_id: u64,
-    /// Risk approval token (proves gateway checked risk)
-    risk_token: RiskToken,
+    command: Command,         // NewOrder/Cancel/Replace
+    conn_id: u64,             // Client connection ID
+    risk_token: RiskToken,    // Risk approval proof
 }
 
 struct RiskToken {
-    /// Account ID (for verification)
     account_id: AccountId,
-    /// Amount of buying power reserved for this order
-    reserved_amount: i64,
-    /// Sequence number from gateway (for idempotency)
-    gateway_seq: u64,
+    reserved_amount: i64,     // Buying power locked
+    gateway_seq: u64,         // Idempotency sequence
 }
 ```
 
-**Engine → Gateway** (fill events and market data):
+**Messages: Engine → Gateway**
 ```rust
 enum EngineToGateway {
-    /// An event to be forwarded to a client
     ClientEvent {
-        conn_id: u64,
-        event: Event,  // Fill, Ack, Reject, etc.
-        risk_token: Option<RiskToken>,
+        conn_id: u64,              // Route to this client
+        event: Event,              // Fill/Ack/Reject
+        risk_token: Option<RiskToken>,  // For reservation release
     },
-    /// Engine health status
     Pong {
         symbol_id: SymbolId,
         orders_in_book: usize,
     },
-    /// Market data broadcast (BookTop, Trade)
     MarketData {
         symbol_id: SymbolId,
-        event: Event,
+        event: Event,              // BookTop/Trade (broadcast)
     },
 }
 ```
 
-**Key Design Decisions:**
-- Gateway wraps client Commands with risk metadata (RiskToken)
-- Engine trusts gateway's risk approval (no re-checking)
-- conn_id allows engine to route responses back through gateway
-- RiskToken returned with events so gateway can release reservations
-- Ping/Pong for health monitoring
-- Market data events separate from client events
+**Design Principles:**
+- Gateway wraps commands with risk metadata
+- Engine trusts gateway (no re-checking)
+- conn_id enables response routing
+- RiskToken allows reservation cleanup
+- Separate unicast (ClientEvent) from broadcast (MarketData)
 
 ---
 
-## Authentication & Session Management ✅ IMPLEMENTED
+### Account State Management
 
-### Overview
-
-The gateway implements a secure authentication system where clients must authenticate with a valid API key before placing orders. This prevents unauthorized trading and enables proper account attribution.
-
-### Authentication Flow
-
-```
-Client                    Gateway                     
-  |                          |
-  |--- Authenticate(api_key)--|
-  |                          | 
-  |                          |--[Verify API key]
-  |                          |--[Lookup account_id]
-  |                          |
-  |<-- AuthSuccess(account_id)|  (if valid)
-  |    or AuthFailure(reason)--<  (if invalid)
-  |                          |
-  |                          |--[Register session: conn_id → account_id]
-  |                          |
-  |--- NewOrder(...) ---------|  (now allowed)
-  |                          |
-```
-
-### Components
-
-#### AuthService (`auth.rs`)
-- **Purpose**: Verify API keys and map them to account IDs
-- **Storage**: In-memory HashMap (production: database)
-- **Methods**:
-  - `authenticate(api_key)` → `Result<AccountId>` - Verify key and return account
-  - `register_api_key(api_key, account_id)` - Admin operation to add keys
-  - `revoke_api_key(api_key)` - Admin operation to remove keys
-  - `has_api_key(api_key)` → `bool` - Check if key exists
-
-#### SessionManager (`session.rs`)
-- **Purpose**: Track which connections are authenticated
-- **Storage**: HashMap<conn_id, account_id>
-- **Methods**:
-  - `register(conn_id, account_id)` - Create session on successful auth
-  - `get_account_id(conn_id)` → `Option<AccountId>` - Get account for connection
-  - `is_authenticated(conn_id)` → `bool` - Check if connection is authenticated
-  - `unregister(conn_id)` - Clean up session on disconnect
-
-#### Security Enforcement
-- **Pre-auth**: Only `Command::Authenticate` and `Command::QueryAccount` allowed
-- **Post-auth**: All commands (NewOrder, Cancel, Replace, etc.) allowed
-- **Unauthenticated orders**: Immediately rejected with `RejectReason::Invalid`
-- **Disconnect cleanup**: Sessions automatically unregistered
-
-### Protocol Types
-
+**Data Structure:**
 ```rust
-// Client → Gateway
-Command::Authenticate {
-    api_key: String  // User's API key (e.g., "test-key-1")
+struct AccountState {
+    account_id: AccountId,
+    buying_power: i64,           // Total available cash
+    tentative_reserved: i64,     // Locked for pending orders
+    positions: HashMap<SymbolId, Position>,
+    risk_limits: HashMap<SymbolId, RiskLimits>,
 }
 
-// Gateway → Client
-Event::AuthSuccess {
-    account_id: AccountId  // Account ID assigned to this session
-}
-
-Event::AuthFailure {
-    reason: String  // Error message (e.g., "Invalid API key")
+struct Position {
+    net_position: i64,     // Net quantity (+ long, - short)
+    avg_price: i64,        // Average entry price
+    realized_pnl: i64,     // Realized profit/loss
 }
 ```
 
-### Test Accounts (Development)
-
-For development and testing, the gateway creates 10 test accounts on startup:
-
-- **Account IDs**: 1-10
-- **API Keys**: "test-key-1" through "test-key-10"
-- **Buying Power**: $1,000,000 each
-- **Usage**: `auth_test` binary validates all authentication paths
-
-### Production Considerations (TODO)
-
-**Current Implementation**:
-- ✅ In-memory API key storage (HashMap)
-- ✅ Session tracking per connection
-- ✅ Security enforcement (no orders without auth)
-- ✅ Clean session cleanup on disconnect
-- ✅ Comprehensive test coverage
-
-**Production Enhancements**:
-- 🚧 Database-backed authentication (PostgreSQL/Redis)
-- 🚧 JWT tokens with expiration and refresh
-- 🚧 Rate limiting on authentication attempts
-- 🚧 Session timeout (idle disconnect after N minutes)
-- 🚧 Max sessions per account limit
-- 🚧 Audit logging (login attempts, failures, IP tracking)
-- 🚧 Admin API for key management (create/revoke/list)
-- 🚧 2FA support for high-value accounts
-- 🚧 API key permissions (read-only, trade-only, admin)
-
-### Testing
-
-**End-to-End Test** (`auth_test` binary):
-1. ✅ Valid API key authentication
-2. ✅ Invalid API key rejection
-3. ✅ Unauthenticated order rejection
-4. ✅ Authenticated order acceptance
-
-**Run Tests**:
-```bash
-# Start gateway + engines
-./scripts/start_engines.sh
-./scripts/start_gateway.sh
-
-# Run authentication test
-cargo run --release --bin auth_test
+**Order Flow:**
+```
+1. Client sends NewOrder
+2. Gateway locks account (DashMap per-account lock)
+3. Check available = buying_power - tentative_reserved
+4. If sufficient, reserve tentatively
+5. Route to engine with RiskToken
+6. Engine matches and sends Fill
+7. Gateway releases tentative, applies actual
+8. Update position and buying_power
+9. Forward Fill to client
 ```
 
-**Expected Output**:
-```
-✓ Successfully authenticated as account_id=1
-✓ Order accepted (Ack received)
-✓ Authentication rejected as expected
-✓ Order rejected as expected (not authenticated)
-```
-
----
-
-## Engine Server Architecture (Simplified)
-
-### Changes from Current Implementation
-
-**Removed**:
-- ❌ Client connection handling (moves to gateway)
-- ❌ Router (gateway handles routing to clients)
-- ❌ Account state management (gateway owns this)
-- ❌ Risk checks (gateway pre-approves)
-
-**Kept**:
-- ✅ Order book matching (core logic unchanged)
-- ✅ Persistence (journaling + snapshots)
-- ✅ Single-threaded engine on dedicated thread
-- ✅ Metrics
-
-**New**:
-- ✅ Listen for orders from gateway (TCP)
-- ✅ Send fills back to gateway (TCP)
-- ✅ Simpler: just a matching engine service
-
-### Engine Threading Model
-
-```
-Gateway Connection (Tokio async)
-         ↓
-    [Command Queue]
-         ↓
-  Engine Thread (single-threaded, dedicated OS thread)
-    • Match orders
-    • Journal to disk
-    • Emit fills
-         ↓
-    [Event Queue]
-         ↓
-Gateway Connection (Tokio async)
-```
-
----
-
-## Deployment Architecture
-
-### AWS Infrastructure
-
-**Cluster Placement Group** in same Availability Zone:
-- Low-latency networking (~50-200μs between servers)
-- Enhanced Networking enabled (SR-IOV, lower jitter)
-- 10Gbe or 25Gbe network
-
-### Server Sizing
-
-#### Gateway Server
-- **Instance**: c7i.4xlarge (16 cores, 32GB RAM)
-- **Cost**: ~$500/month
-- **Workload**: Handles 1000s of client connections, risk checks, routing
-- **NVMe SSD**: For account journal
-
-#### Hot Pair Engines (Top 5-10 pairs)
-- **Instance**: c7i.2xlarge (8 cores, 16GB RAM)
-- **Cost**: ~$300/month each
-- **Pairs**: BTC/USD, ETH/USD, BTC/ETH, SOL/USD, etc.
-- **High order flow**: Needs CPU power
-
-#### Warm Pair Engines (Next 20-40 pairs)
-- **Instance**: c7i.xlarge (4 cores, 8GB RAM)
-- **Cost**: ~$150/month each
-- **Pairs**: MATIC/USD, LINK/USD, AVAX/USD, etc.
-
-#### Cold Pair Engines (Long tail, 100+ pairs)
-- **Instance**: t3.small or t3.micro (1-2 cores, 2-4GB RAM)
-- **Cost**: ~$15-50/month each
-- **Pairs**: Meme coins, low-cap tokens
-- **Low volume**: 10 orders per day
-
-### Example Cost (50 Trading Pairs)
-- Gateway: 1 × $500 = $500
-- Hot engines: 5 × $300 = $1,500
-- Warm engines: 15 × $150 = $2,250
-- Cold engines: 30 × $30 = $900
-- ClickHouse (market data): 1 × $200 = $200
-- **Total: ~$5,350/month**
-
----
-
-## Communication & Networking
-
-### Gateway ↔ Engines
-- **Protocol**: TCP with length-delimited framing (existing implementation)
-- **Connection Model**: Gateway maintains persistent connections to each engine
-- **Latency**: 50-200μs in same AZ with Enhanced Networking
-- **Codec**: Binary (compact, fast) or JSON (debugging)
-
-### Client ↔ Gateway
-- **Protocol**: Same as current (binary on :9000, JSON on :9001)
-- **Connection Model**: Long-lived TCP connections
-- **Gateway acts as proxy**: Routes orders to engines, aggregates fills
-
-### Market Data → ClickHouse
-- **Protocol**: ClickHouse native protocol or HTTP
-- **Mode**: Async batched writes (buffer 1000 events, flush every 100ms)
-- **Non-critical path**: No impact on order latency
-
----
-
-## Persistence Strategy
-
-### Gateway Persistence (Account State)
-- **Journal**: Account updates (deposits, withdrawals, fills, risk limits)
-- **Format**: [u32 len][postcard(AccountUpdate)][u32 crc32]
-- **Snapshots**: Periodic dumps of all account state
-- **Recovery**: Load snapshot + replay journal
-
-### Engine Persistence (Order Book)
-- **Journal**: Commands (NewOrder, Cancel, Replace)
-- **Format**: [u32 len][postcard(Command)][u32 crc32]
-- **Snapshots**: Periodic order book snapshots
-- **Recovery**: Load snapshot + replay journal
-
-Both use **same persistence crate** (already implemented).
-
----
-
-## Market Data Pipeline
-
-```
-Engine Servers
-  ↓ (emit BookTop, Trade events)
-Gateway
-  ↓ (forward to clients + buffer for storage)
-Market Data Service
-  ↓ (batch write every 100ms)
-ClickHouse Database
-  ↓ (query API for historical data)
-Analytics / Dashboards
-```
-
-### ClickHouse Schema
-
-```sql
-CREATE TABLE trades (
-    timestamp DateTime64(6),
-    symbol_id UInt32,
-    price Int64,
-    qty Int64,
-    taker_order_id UInt64,
-    maker_order_id UInt64,
-    taker_side Enum('Buy', 'Sell')
-) ENGINE = MergeTree()
-ORDER BY (symbol_id, timestamp);
-
-CREATE TABLE book_snapshots (
-    timestamp DateTime64(6),
-    symbol_id UInt32,
-    best_bid_px Nullable(Int64),
-    best_bid_qty Nullable(Int64),
-    best_ask_px Nullable(Int64),
-    best_ask_qty Nullable(Int64)
-) ENGINE = MergeTree()
-ORDER BY (symbol_id, timestamp);
-```
-
----
-
-## Configuration Files
-
-### Gateway Config (`gateway.toml`)
-```toml
-[server]
-listen_binary = "0.0.0.0:9000"
-listen_json = "0.0.0.0:9001"
-admin_http = "0.0.0.0:8080"
-
-[persistence]
-journal_path = "/data/accounts.journal"
-snapshot_dir = "/data/snapshots"
-journal_batch_size = 100
-snapshot_interval = 100000
-
-[[engines]]
-symbol_id = 1
-name = "BTC/USD"
-address = "10.0.1.10:9000"
-
-[[engines]]
-symbol_id = 2
-name = "ETH/USD"
-address = "10.0.1.11:9000"
-
-[market_data]
-clickhouse_url = "http://10.0.1.20:8123"
-buffer_size = 1000
-flush_interval_ms = 100
-```
-
-### Engine Config (`engine.toml`)
-```toml
-[engine]
-symbol_id = 1
-symbol_name = "BTC/USD"
-listen_addr = "0.0.0.0:9000"
-gateway_addr = "10.0.1.5:8000"
-
-[persistence]
-journal_path = "/data/btc_usd.journal"
-snapshot_dir = "/data/snapshots"
-journal_batch_size = 100
-snapshot_interval = 100000
-```
-
----
-
-## Implementation Roadmap
-
-### Phase 1: Refactor Current Code ✅ COMPLETE
-- [x] Move to `tokio_util::LengthDelimitedCodec` (battle-tested framing)
-- [x] Risk management foundation (positions, limits)
-- [x] Persistence with journaling + snapshots
-
-### Phase 2: Split Gateway & Engine (NEXT - 2-3 weeks)
-- [ ] Rename `server` crate → `engine_server`
-- [ ] Create `gateway_server` crate
-- [ ] Move account management to gateway
-- [ ] Implement tentative reservations in gateway
-- [ ] Define gateway ↔ engine protocol
-- [ ] Simplify engine (remove client handling, routing)
-- [ ] Test with 2 engines (BTC/USD, ETH/USD)
-
-### Phase 3: Multi-Engine Deployment (2 weeks)
-- [ ] Gateway routing table configuration
-- [ ] Persistent TCP connection pool in gateway
-- [ ] Engine discovery and health checks
-- [ ] Test with 10+ engines
-- [ ] Deployment scripts for AWS
-
-### Phase 4: Market Data Pipeline (1 week)
-- [ ] ClickHouse setup and schema
-- [ ] Market data service (buffers events)
-- [ ] Batch writer to ClickHouse
-- [ ] Query API for historical data
-
-### Phase 5: Production Readiness (2-3 weeks)
-- [ ] Monitoring and alerting (Prometheus + Grafana)
-- [ ] Admin API for operations (risk limit changes, etc.)
-- [ ] Load testing and benchmarking
-- [ ] Failover and recovery testing
-- [ ] Documentation for deployment
-
-### Phase 6: Advanced Features (Future)
-- [ ] Dynamic engine allocation (promote/demote pairs)
-- [ ] Multi-region deployment
-- [ ] Advanced risk (portfolio margin, dynamic limits)
-- [ ] WebSocket API for real-time market data
-
----
-
-## Testing Strategy
-
-### Unit Tests
-- Account state management (reservations, fills)
-- Risk checks (position limits, buying power)
-- Order book matching (existing tests)
-
-### Integration Tests
-- Gateway → Engine flow (full order lifecycle)
-- Multiple concurrent orders (race condition tests)
-- Persistence and recovery (gateway + engine)
-
-### Performance Tests
-- Latency benchmarks (p50/p99/p999)
-- Throughput tests (orders per second)
-- Multi-engine stress tests
-
-### Smoke Tests (justfile recipes)
-- `just smoke-gateway` - Test gateway account management
-- `just smoke-distributed` - Gateway + 2 engines
-- `just smoke-persistence` - Full persistence cycle
-- `just bench-distributed` - Multi-engine RTT benchmark
-
----
-
-## Distributed System Testing Guide
-
-### Testing Architecture
-
-```
-Client (test_client or bench tool)
-    ↓
-Gateway Server (:9000 binary, :9001 JSON, :8080 admin)
-    ├─ Account state & risk checks
-    ├─ Routes to engines by symbol_id
-    └─ Aggregates responses from engines
-    ↓
-┌───────┴────────┐
-↓                ↓
-BTC/USD Engine   ETH/USD Engine
-(:9100)          (:9101)
-(:8081 admin)    (:8082 admin)
-```
-
-### Prerequisites
-
-1. **Build Release Binaries**
-   ```bash
-   cargo build --release --bin gateway_server
-   cargo build --release --bin engine_server
-   cargo build --release --bin bench  # optional test client
-   ```
-
-2. **Configure Engines** (`engines.toml`)
-   ```toml
-   [[engines]]
-   symbol_id = 1
-   symbol_name = "BTC/USD"
-   address = "127.0.0.1:9100"
-
-   [[engines]]
-   symbol_id = 2
-   symbol_name = "ETH/USD"
-   address = "127.0.0.1:9101"
-   ```
-
-### Manual Testing (Multi-Terminal)
-
-**Terminal 1: Start Engine Servers**
-```bash
-./start_engines.sh
-# Or manually:
-# ./target/release/engine_server --symbol-id 1 --symbol-name "BTC/USD" --listen-addr 127.0.0.1:9100
-# ./target/release/engine_server --symbol-id 2 --symbol-name "ETH/USD" --listen-addr 127.0.0.1:9101
-```
-
-Wait for: "Listening for gateway connection on 127.0.0.1:9100"
-
-**Terminal 2: Start Gateway Server**
-```bash
-./start_gateway.sh
-# Or manually:
-# ./target/release/gateway_server --engines-config engines.toml
-```
-
-Wait for:
-- "Connected to 2 engine(s)"
-- "Listening for clients: binary=0.0.0.0:9000, json=0.0.0.0:9001"
-- "Created test account: account_id=1, buying_power=$1000000"
-
-**Terminal 3: Send Test Orders**
-```bash
-# Simple test client
-cargo run --bin test_client
-
-# Or benchmark tool
-cargo run --release --bin bench -- --mode smoke-match --json-addr 127.0.0.1:9001
-```
-
-### Expected System Behavior
-
-#### 1. Engine Startup
-- Creates journal file: `journal/engine_1_journal.bin`, `journal/engine_2_journal.bin`
-- Creates snapshot directory: `journal/engine_1_snapshots/`, `journal/engine_2_snapshots/`
-- Admin HTTP starts on `:8081`, `:8082`
-- Waits for gateway connection
-
-#### 2. Gateway Startup
-- Loads `engines.toml` configuration
-- Connects to all configured engines via persistent TCP
-- Creates test account (id=1) with $1M buying power
-- Listens for client connections:
-  - Binary protocol: `:9000`
-  - JSON protocol: `:9001`
-  - Admin HTTP: `:8080`
-
-#### 3. Order Flow (End-to-End)
-```
-Client → Gateway → Risk Check → Route to Engine → Match → Fill → Gateway → Client
-```
-
-**Detailed Steps:**
-1. Client sends `NewOrder` to gateway
-2. Gateway locks account and performs risk check
-3. Gateway reserves buying power tentatively
-4. Gateway routes order to correct engine (by symbol_id)
-5. Engine receives order and performs matching
-6. Engine generates Fill/Ack events
-7. Engine sends events back to gateway
-8. Gateway updates account state (releases reservation, applies fill)
-9. Gateway forwards event to client
-
-#### 4. Expected Logs
-
-**Gateway Logs:**
-```
-Gateway connected to engine: BTC/USD (127.0.0.1:9100)
-Gateway connected to engine: ETH/USD (127.0.0.1:9101)
-Created test account: account_id=1, buying_power=$1000000
-Risk check passed: account_id=1, symbol_id=1, required=$50000
-Order routed to engine: symbol_id=1, order_id=12345
-Fill received from engine: symbol_id=1, fill_id=67890
-```
-
-**Engine Logs:**
-```
-Listening for gateway connection on 127.0.0.1:9100
-Gateway connected
-Command received: NewOrder { symbol_id=1, account_id=1, ... }
-Fill generated: order_id=12345, price=50000, qty=1
-```
-
-**Client Output:**
-```
-Connected to gateway at 127.0.0.1:9001
-Sent: NewOrder { symbol_id=1, side=Buy, price=50000, qty=1 }
-Received: Ack { order_id=12345 }
-Received: Fill { order_id=12345, price=50000, qty=1 }
-```
-
-### Testing Scripts
-
-Scripts are located in the `scripts/` directory:
-
-- **`scripts/start_engines.sh`** - Launch multiple engine servers
-- **`scripts/start_gateway.sh`** - Launch gateway server  
-- **`scripts/run_benchmark.sh`** - Run distributed latency benchmark
-- **`scripts/test_risk.sh`** - Test risk management (reject orders)
-- **`scripts/test_risk_reject.sh`** - Test position limit rejections
-
-All scripts should be run from the project root directory.
-
-### Known Limitations (Work in Progress)
-
-#### Completed ✅
-- ✅ Gateway ↔ Engine persistent TCP connections
-- ✅ Risk checks with tentative reservations
-- ✅ Order routing by symbol_id
-- ✅ Fill updates to account state
-- ✅ Client connection handling
-
-#### TODO 🚧
-- 🚧 Response routing (order_id → client mapping)
-  - Gateway needs to track which client sent which order
-  - Currently responses may not reach correct client
-  
-- 🚧 Risk token lifecycle
-  - Need to pass RiskToken through engine
-  - Required for releasing reservations on cancels
-  
-- 🚧 Market data broadcasting
-  - BookTop/Trade events not yet broadcasted to clients
-  - Need separate pub/sub channel for market data
-  
-- 🚧 Cancel and Replace commands
-  - Account state updates for Cancel/Replace not implemented
-  - Need to release reservations on cancel
-  - Need to adjust reservations on replace
-
-### Troubleshooting
-
-**Problem: "Failed to connect to engine at 127.0.0.1:9100"**
-- Solution: Start engines before gateway
-- Check: `lsof -i :9100` to verify port is free
-
-**Problem: "Account not found (id=1)"**
-- Solution: Gateway creates test account on startup
-- Check gateway logs for "Created test account"
-
-**Problem: "No engine configured for symbol_id=X"**
-- Solution: Verify `engines.toml` has correct symbol_ids
-- Match symbol_id in orders with configured engines
-
-**Problem: "Risk check failed: InsufficientFunds"**
-- Solution: Order requires more buying power than available
-- Check: Test account has $1M, verify order size
-- Formula: `required = price * qty`
-
-**Problem: Client doesn't receive responses**
-- Known issue: Response routing incomplete
-- Workaround: Check gateway logs for fill events
-
-### Cleanup
-
-```bash
-# Kill all processes
-pkill -9 engine_server gateway_server bench test_client
-
-# Clean persistence files
-just clean-persistence  # or: rm -rf journal/
-```
-
-### Next Steps for Production-Ready Testing
-
-1. **Fix response routing** - Track order_id → conn_id mapping in gateway
-2. **Implement cancel/replace** - Account state updates for order modifications
-3. **Add integration tests** - Automated test suite for distributed flow
-4. **Multi-client stress test** - 100+ concurrent clients
-5. **Failure testing** - Engine crash recovery, network partition handling
-6. **AWS deployment** - Test with real network latency in cluster placement group
-
----
-
-## Benchmark Results
-
-**Date**: 2026-02-05  
-**Test Environment**: Localhost (127.0.0.1)  
-**Status**: ✅ All systems operational
-
-### Executive Summary
-
-The distributed trading system achieves **production-ready performance**:
-
-- **Engine Matching**: ~48ns per order (20M+ orders/second single-threaded)
-- **Gateway Throughput**: ~360ns per order (2.75M+ orders/second)
-- **End-to-End Latency**: **32μs p50** for full order cycle (1300x improvement after optimization)
-- **Architecture**: Gateway + per-symbol engines with risk management
-- **Optimizations Applied**: TCP_NODELAY + batched writes (feed/flush pattern)
-
-### 1. Engine Matching Performance (Isolated)
-
-**Test**: Single-threaded order book matching  
-**Tool**: `cargo bench --bench engine_step`
-
-```
-Mean:     48.4 ns per order
-Range:    47.9 - 49.1 ns
-Throughput: ~20.6 million orders/second (single-threaded)
-```
-
-**What this measures**: Pure order book matching (price-time FIFO, order updates, fill generation)
-
-### 2. Gateway Throughput (Binary Protocol)
-
-**Test**: Order submission through gateway → engine routing  
-**Tool**: `cargo run -p bench -- --mode bench-gateway-throughput`  
-**Iterations**: 10,000 orders
-
-```
-Binary Protocol:
-  Throughput:      2,752,095 orders/second
-  Avg submission:  360 ns per order
-
-JSON Protocol (comparison):
-  Throughput:      1,994,050 orders/second
-  Avg submission:  500 ns per order
-
-Performance gain: Binary is 38% faster than JSON
-```
-
-**Path breakdown**:
-1. Client sends binary command (NewOrder with message type)
-2. Gateway deserializes and validates
-3. Gateway locks account and checks risk
-4. Gateway reserves buying power tentatively
-5. Gateway routes to engine (by symbol_id)
-
-### 3. End-to-End Latency (Optimized)
-
-**Test**: Full order lifecycle with fills  
-**Tool**: `cargo run --release -p bench -- --mode bench-distributed-binary`  
-**Iterations**: 1,000 orders  
-**Measurement**: HDR histogram with p50/p90/p95/p99/p999
-
-```
-BEFORE OPTIMIZATION (Initial):
-  p50  = 42,041 μs (42 ms)
-  p90  = 45,613 μs (45.6 ms)
-  p99  = 46,694 μs (46.7 ms)
-
-AFTER PHASE 1 (TCP_NODELAY enabled):
-  p50  = 39 μs (1000x improvement!)
-  p90  = 42 μs
-  p99  = 49 μs
-
-AFTER PHASE 2 (feed + flush batching):
-  p50  = 32 μs (1300x improvement!)
-  p90  = 35 μs
-  p99  = 42 μs
-```
-
-**What this measures**: Full round-trip latency:
-- Client → Gateway (network + binary deserialize)
-- Gateway risk check (~360ns from throughput test)
-- Gateway → Engine routing
-- Engine matching (~48ns from engine bench)
-- Engine → Gateway (fill event)
-- Gateway account update (release reservation)
-- Gateway → Client (binary serialize + network)
-
-### Optimization Journey
-
-#### Initial Problem: 42ms Latency on Localhost
-The initial latency was unacceptable for a high-performance system. Investigation revealed:
-
-1. **TCP_NODELAY not set** - Nagle's algorithm was buffering small packets (~40ms delay)
-2. **SinkExt::send() auto-flush** - Each message triggered immediate flush (no batching)
-3. **Multiple network hops** - Client → Gateway → Engine → Gateway → Client
-
-#### Phase 1: Enable TCP_NODELAY
-**Files modified**:
-- `gateway_server/src/client_handler.rs:39` - Client connections
-- `gateway_server/src/engine_router.rs:85` - Engine connections
-- `engine_server/src/gateway_connection.rs` - Gateway connections
-
-**Code change**:
+**Race Condition Prevention:**
 ```rust
-stream.set_nodelay(true)?;
+// Scenario: Two $100k orders with $100k buying power
+Order A arrives:
+  1. Lock account
+  2. Check: $100k - $0 = $100k available ✓
+  3. Reserve: tentative += $100k
+  4. Unlock account
+  5. Route to engine
+
+Order B arrives:
+  1. Lock account
+  2. Check: $100k - $100k = $0 available ✗
+  3. Reject: InsufficientFunds
+  4. Unlock account
+
+Result: Only one order accepted (correct!)
 ```
 
-**Result**: 42ms → 39μs (1000x improvement!)
+---
 
-#### Phase 2: Batched Writes (feed + flush)
-**Files modified**: Same as Phase 1
+### Persistence Strategy
 
-**Code change**:
+**Journal Format:**
+```
+[u32 length][payload bytes][u32 crc32]
+```
+
+**What's Journaled:**
+- **Engine:** NewOrder, Cancel, Replace commands (BEFORE processing)
+- **Gateway:** Account creation events (fills NOT journaled - engines are source of truth)
+
+**Snapshot Format:**
 ```rust
-// OLD: Auto-flush per message
-write_half.send(frame).await?;
+// Engine snapshot
+struct OrderBookSnapshot {
+    sequence: u64,
+    symbol_id: SymbolId,
+    orders: Vec<OrderSnapshot>,  // All resting orders
+}
 
-// NEW: Batch + explicit flush
-while let Some(frame) = out_rx.recv().await {
-    write_half.feed(frame).await?;
-    // Drain available messages
-    while let Ok(frame) = out_rx.try_recv() {
-        write_half.feed(frame).await?;
-    }
-    write_half.flush().await?;
+// Gateway snapshot
+struct AccountSnapshot {
+    sequence: u64,
+    accounts: HashMap<AccountId, AccountState>,
 }
 ```
 
-**Result**: 39μs → 32μs (18% additional improvement)
+**Recovery Process:**
+```
+1. Find latest snapshot
+2. Restore state from snapshot
+3. Replay journal entries after snapshot sequence
+4. Result: Deterministic state
+```
 
-#### Phase 3: Socket Buffer Tuning (Skipped)
-**Reason**: TcpStream doesn't expose `set_recv_buffer_size()` without `socket2` crate  
-**Potential gain**: ~2-5μs
+**Why Engines Are Source of Truth:**
+- Fills are authoritative from engines
+- Gateway reconstructs positions from fill events on restart
+- No need to journal fills (replay gives same result)
 
-### Comparison with Industry Standards
+---
 
-| Exchange         | Typical Latency | Our System     |
-|------------------|-----------------|----------------|
-| Coinbase Pro     | 1-5 ms         | 0.032 ms (32μs)|
-| Binance          | 0.5-2 ms       | 0.032 ms (32μs)|
-| Traditional HFT  | 0.1-0.5 ms     | 0.032 ms (32μs)|
+## Production Deployment Guide
 
-**Conclusion**: Our system **significantly outperforms** modern crypto exchanges on localhost. Production latency (same AZ) expected to be 50-100μs with real network overhead.
+### AWS Recommendations
 
-### Performance Characteristics
+**Instance Types:**
+```
+Gateway:
+  - c7i.4xlarge (16 cores, 32GB RAM, ~$500/mo)
+  - Handles 1000s of connections
+  
+Hot Engine Servers (BTC/USD, ETH/USD):
+  - c7i.2xlarge (8 cores, 16GB RAM, ~$300/mo each)
+  - High order flow
+  
+Warm Engine Servers (Mid-tier pairs):
+  - c7i.xlarge (4 cores, 8GB RAM, ~$150/mo each)
+  
+Cold Engine Servers (Long tail):
+  - t3.micro/small (1-2 cores, ~$15-50/mo each)
+```
 
-**Strengths**:
-- ✅ Sub-microsecond engine matching (48ns)
-- ✅ Single-threaded engine (no lock contention)
-- ✅ Efficient risk checks (~360ns with account locking)
-- ✅ Zero-copy serialization (postcard binary)
-- ✅ Persistent TCP connections (no handshake overhead)
-- ✅ TCP_NODELAY enabled (no Nagle buffering)
-- ✅ Batched writes (feed/flush pattern)
+**Network Setup:**
+- Same Availability Zone (AZ)
+- Cluster Placement Group (low latency, high bandwidth)
+- Enhanced Networking enabled (SR-IOV)
+- 10Gbe or 25Gbe networking
+- Expected latency: 50-200μs between servers
 
-**Optimizations Applied**:
-- Lock-free order book operations
-- Pre-allocated buffers for serialization
-- Single-threaded engine on dedicated OS thread
-- Crossbeam channels for low-latency IPC
-- DashMap for concurrent account access
-- TCP_NODELAY on all connections
-- Batched socket writes
+**Storage:**
+- NVMe SSD for journals
+- Snapshot to S3 periodically
 
-### Running Benchmarks
+---
+
+## Contributing
+
+### Code Style
+
+- Use `rustfmt` for formatting
+- Use `clippy` for linting
+- Add `#[allow(dead_code)]` for future-use code
+- Document public APIs
+- Write tests for new features
+
+### Pull Request Process
+
+1. Create feature branch
+2. Make changes
+3. Run `just check` (fmt + clippy + tests)
+4. Run benchmarks if performance-sensitive
+5. Update PROJECT_CONTEXT.md if needed
+6. Submit PR with description
+
+---
+
+## Troubleshooting
+
+### Servers Won't Start
 
 ```bash
-# Build release binaries
+# Check if ports are in use
+ss -tuln | grep -E ":(9000|9001|9100|9101)"
+
+# Kill existing processes
+just kill
+
+# Check logs
+tail -f engine1.log
+tail -f gateway.log
+```
+
+### Benchmarks Hang
+
+```bash
+# If JSON benchmarks hang, use binary protocol
+just bench-rtt          # Works
+just bench-rtt-fast     # Works
+
+# Avoid JSON until fixed
+# just bench-distributed  # Don't use
+```
+
+### Build Errors
+
+```bash
+# Clean and rebuild
+just clean
 cargo build --release
 
-# 1. Engine matching benchmark (offline, no server)
-cargo bench --bench engine_step
-
-# 2. Gateway throughput benchmark
-# Terminal 1: Start servers
-./scripts/start_engines.sh
-./scripts/start_gateway.sh
-
-# Terminal 2: Run benchmark
-cargo run --release -p bench -- --mode bench-gateway-throughput-binary --bin-addr 127.0.0.1:9000 --iters 10000
-
-# 3. End-to-end latency benchmark (full distributed system)
-cargo run --release -p bench -- --mode bench-distributed-binary --bin-addr 127.0.0.1:9000 --iters 1000
+# Update dependencies
+cargo update
 ```
 
-### Next Steps for Further Optimization
+### Performance Issues
 
-#### High Priority (Potential gains shown)
-1. **Socket buffer tuning** (~5μs) - Use socket2 crate for recv/send buffer sizes
-2. **CPU pinning** (~10μs) - Pin engine threads to specific cores (reduce context switches)
-3. **Profile hot paths** (~5μs) - Identify remaining allocations/overhead
+```bash
+# Profile with flamegraph (requires cargo-flamegraph)
+cargo install flamegraph
+cargo flamegraph --bin engine_server
 
-#### Medium Priority
-4. **Multi-client benchmarks** - Test concurrent client throughput
-5. **AWS deployment test** - Measure real network latency (cluster placement group)
-6. **Add p50/p99/p999 tracking** - Continuous latency monitoring
-
-#### Low Priority
-7. **NUMA optimization** - Optimize memory allocation for multi-socket servers
-8. **io_uring** - Consider Linux io_uring for extreme low-latency (requires kernel 5.1+)
-
-### Hardware Recommendations (Production)
-
-**For Sub-100μs Latency**:
-- CPU: Intel Xeon Scalable (Ice Lake+) or AMD EPYC
-- Cores: Dedicated cores for each engine (8-16 for hot pairs)
-- RAM: 32-64GB ECC
-- Network: 10Gbe or 25Gbe Enhanced Networking (AWS SR-IOV)
-- Storage: NVMe SSD for journaling
-- Placement: Same AZ, Cluster Placement Group
-
-**AWS Instance Types**:
-- Gateway: c7i.4xlarge (16 cores, 32GB)
-- Hot Engines: c7i.2xlarge (8 cores, 16GB)
-- Cold Engines: t3.micro/small (1-2 cores, 2-4GB)
-
-### Conclusion
-
-The system achieves **production-ready performance** competitive with leading exchanges:
-
-- Engine: **48ns** (20M+ ops/sec)
-- Gateway: **360ns** (2.75M+ ops/sec)
-- Full RTT: **32μs** (localhost optimized)
-- Expected production p99: **50-100μs** (same AZ)
-
-System is ready for production deployment after AWS testing.
+# Check CPU pinning
+taskset -c 0-7 ./target/release/engine_server ...
+```
 
 ---
 
-## Metrics (Prometheus)
+## Resources
 
-### Gateway Metrics
-- `gateway_connections` - Active client connections
-- `gateway_accounts_total` - Total accounts in memory
-- `gateway_risk_checks_total{result}` - Risk check results (pass/fail)
-- `gateway_orders_routed_total{symbol}` - Orders routed to engines
-- `gateway_fills_received_total{symbol}` - Fills from engines
-- `gateway_reservation_conflicts_total` - Tentative reservation conflicts
-- `gateway_journal_appends_total` - Account journal writes
-- `gateway_snapshots_total` - Account snapshots
-
-### Engine Metrics (per engine)
-- `engine_orders_received_total` - Orders from gateway
-- `engine_fills_total` - Fills generated
-- `engine_book_depth` - Order book depth (bids + asks)
-- `engine_journal_appends_total` - Journal writes
-- `engine_snapshots_total` - Snapshots
+- **Project Repository:** [link]
+- **Issue Tracker:** [link]
+- **Documentation:** `cargo doc --workspace --open`
+- **Benchmarks:** `just perf` or `cargo bench`
 
 ---
 
-## Completed Features ✅
+## License
 
-### Engine (formerly `server`)
-- ✅ Order book matching (FIFO, price-time priority)
-- ✅ Persistence (journaling + snapshots)
-- ✅ Risk management foundation (positions, limits)
-- ✅ Binary and JSON protocols
-- ✅ LengthDelimitedCodec for framing
-- ✅ Prometheus metrics
-
-### Gateway ✅ IMPLEMENTED
-- ✅ **Authentication & Session Management**
-  - API key verification (AuthService)
-  - Session tracking (SessionManager)
-  - Security enforcement (reject unauthenticated orders)
-  - Test coverage (auth_test binary)
-- ✅ **Account State Management**
-  - In-memory account state with per-account locking
-  - Positions tracking (net_position, avg_price, realized_pnl)
-  - Buying power management
-- ✅ **Risk Management**
-  - Tentative reservations (prevent double-spend)
-  - Pre-flight risk checks
-  - Position limit enforcement
-  - Order size validation
-- ✅ **Order Routing**
-  - Persistent TCP connections to engines
-  - Symbol-based routing (symbol_id → engine)
-  - Fill event aggregation
-  - Client response routing
-- ✅ **Client Connection Handling**
-  - Binary and JSON protocol support
-  - Length-delimited framing
-  - TCP_NODELAY for low latency
-  - Batched writes (feed/flush pattern)
-- ⏳ Gateway persistence (journaling + snapshots) - TODO
+MIT
 
 ---
 
-## Current Task List
-
-### Immediate (This Week)
-1. ✅ Rename `server` crate to `engine_server` - COMPLETE
-   - Renamed directory: `crates/server` → `crates/engine_server`
-   - Updated workspace Cargo.toml
-   - Updated package name and binary name
-   - Updated all justfile references
-   - Verified build and tests pass
-2. ✅ Create `gateway_server` crate skeleton - COMPLETE
-   - Created directory structure: `crates/gateway_server/src/`
-   - Created Cargo.toml with dependencies (dashmap for concurrent hashmap)
-   - Added to workspace members
-   - Created main.rs with CLI argument parsing (clap)
-   - Created module stubs:
-     - `account_manager.rs` - Account state + tentative reservations
-     - `engine_router.rs` - Routes orders to engine servers
-     - `client_handler.rs` - Handles client connections
-     - `config.rs` - CLI configuration
-   - Verified compilation successful
-   - Binary created: `target/debug/gateway_server`
-3. ✅ Define gateway ↔ engine protocol types - COMPLETE
-   - Created `common/src/gateway_protocol.rs` with protocol types
-   - Defined `GatewayToEngine` enum (Execute, Ping)
-   - Defined `EngineToGateway` enum (ClientEvent, Pong, MarketData)
-   - Defined `ExecuteCommand` struct (wraps Command with risk metadata)
-   - Defined `RiskToken` struct (risk approval + reservation tracking)
-   - Added helper functions (command_symbol_id, command_account_id, etc.)
-   - Exported from common crate
-   - Verified workspace builds successfully
-   - Updated PROJECT_CONTEXT.md with protocol specification
-4. ✅ Implement `AccountManager` in gateway (with tentative reservations) - COMPLETE
-   - Implemented full AccountState struct with:
-     - buying_power tracking
-     - tentative_reserved for pending orders
-     - positions HashMap<SymbolId, Position>
-     - risk_limits HashMap<SymbolId, RiskLimits>
-   - Implemented check_and_reserve with:
-     - Account locking via DashMap (per-account concurrent access)
-     - Buying power validation
-     - Position limit checks
-     - Order size validation
-     - Tentative reservation to prevent double-spend
-   - Implemented apply_fill:
-     - Releases tentative reservations
-     - Updates actual buying power
-     - Updates positions (net_position, avg_price)
-     - Handles both buy and sell sides correctly
-   - Implemented release_reservation for cancelled orders
-   - Added 7 unit tests (all passing):
-     - Account creation
-     - Sufficient/insufficient funds
-     - Double-spend prevention
-     - Reservation release
-     - Sell orders (no buying power needed)
-     - Account not found errors
-   - Used atomic counter for gateway sequence numbers (idempotency)
-5. ✅ Implement EngineRouter (routing and connection pool) - COMPLETE
-   - Implemented full EngineRouter with persistent TCP connections
-   - Features:
-     - TOML configuration loading (engines.toml)
-     - Routing table (symbol_id → engine address)
-     - Persistent connection pool using LengthDelimitedCodec
-     - Async event receiving from all engines
-     - Connection health monitoring
-   - Key components:
-     - `EngineConnection`: Wraps Framed TCP stream
-     - `route_to_engine()`: Sends GatewayToEngine messages
-     - `recv_event()`: Receives EngineToGateway events
-     - Background tasks per engine for event listening
-   - Serialization: postcard (compact binary)
-   - Added 2 unit tests (passing):
-     - TOML config parsing
-     - Routing table construction
-   - Created engines.toml.example template
-6. ✅ Implement ClientHandler (client connection handling with risk checks) - COMPLETE
-   - Implemented full client connection handling (~220 lines)
-   - Flow:
-     1. Receive command from client
-     2. Check risk with AccountManager
-     3. Route to appropriate engine via EngineRouter
-     4. Wait for response from engine
-     5. Update AccountManager with fill
-     6. Send response to client
-   - Key components:
-     - `handle_client_connection()`: Per-client connection handler
-     - `client_read_loop()`: Reads commands, does risk checks, routes to engines
-     - `handle_engine_responses()`: Background task for routing engine events to clients
-     - `GatewayContext`: Shared state (AccountManager, EngineRouter, Metrics)
-   - Wired everything together in main.rs:
-     - Initialize AccountManager (with test account)
-     - Load and connect to engines from engines.toml
-     - Start TCP listeners for binary + JSON protocols
-     - Spawn background task for engine response handling
-     - Accept and handle client connections
-   - Created engines.toml configuration file
-   - Binary successfully builds and compiles
-
-### Short-term (Next 2 Weeks)
-7. ✅ Simplify engine_server: remove client handling, keep only matching - COMPLETE
-   - Created new `gateway_connection.rs` (~120 lines)
-   - Removed old client connection handling (connection.rs, router.rs, gateway.rs)
-   - Engine now ONLY accepts connections from gateway
-   - Protocol changes:
-     - Receives: `GatewayToEngine` messages (Execute commands, Ping)
-     - Sends: `EngineToGateway` events (ClientEvent, Pong, MarketData)
-   - Updated CLI args for per-symbol configuration:
-     - `--symbol-id`: Required, identifies which symbol this engine handles
-     - `--symbol-name`: Required, for logging (e.g., "BTC/USD")
-     - `--listen-addr`: Where to listen for gateway (default: 0.0.0.0:9100)
-     - Auto-generated paths: `engine_{symbol_id}_journal.bin`, `engine_{symbol_id}_snapshots/`
-   - Simplified main.rs:
-     - Accepts ONE gateway connection (not multiple clients)
-     - Starts engine thread (unchanged)
-     - Forwards GatewayToEngine → Engine
-     - Forwards Engine events → EngineToGateway
-   - Removed 3 files: connection.rs, router.rs, gateway.rs
-   - Binary builds successfully
-   - Reduced complexity: ~400 lines of code removed
-8. ✅ Test gateway + 2 engines locally - COMPLETE
-   - Created testing infrastructure:
-     - `start_engines.sh` - Launch multiple engine servers
-     - `start_gateway.sh` - Launch gateway server
-     - `TEST_DISTRIBUTED.md` - Complete testing guide
-     - `test_client.rs` - Simple test client for validation
-   - Built release binaries successfully
-   - Started 2 engine servers (BTC/USD on :9100, ETH/USD on :9101)
-   - Started gateway server
-   - Verified end-to-end functionality:
-     - ✅ Engines start and listen for gateway connection
-     - ✅ Gateway loads engines.toml configuration (2 engines)
-     - ✅ Gateway connects to both engines successfully
-     - ✅ Engine logs confirm gateway connections
-     - ✅ Test account created (account_id=1, $1M buying power)
-     - ✅ Gateway listens for clients on ports 9000 (binary) and 9001 (JSON)
-     - ✅ Test client successfully connects to gateway
-     - ✅ Gateway accepts client connections
-     - ✅ Client handler receives and processes messages
-   - Bugs fixed during testing:
-     - 🐛 Fixed client_senders registry not passed to client handlers
-     - 🐛 Fixed EngineRouter mutex deadlock (holding lock during blocking recv)
-     - 🐛 Refactored EngineRouter to split read/write halves (no mutex contention)
-   - Architecture changes:
-     - Separated engine connections into read and write halves
-     - Read half owned by background task (no lock needed)
-     - Write half stored in Arc<Mutex<HashMap>> for sending
-     - Each engine has dedicated reader task (no blocking between engines)
-   - All core functionality working:
-     - ✅ Client → Gateway connection
-     - ✅ Gateway → Engine connections (persistent TCP)
-     - ✅ Engine → Gateway event channel
-     - ✅ Client registration and routing infrastructure
-   - Ready for actual order testing with proper Command/Event payloads
-9. Add integration tests for distributed flow
-10. Benchmark latency (gateway → engine → gateway)
-
-### Medium-term (Next Month)
-11. AWS deployment scripts (cluster placement group)
-12. ClickHouse setup and market data pipeline
-13. Admin API for operations
-14. Load testing and optimization
-15. Production deployment guide
-
----
-
-## Design Constraints & Goals
-
-- **Low latency**: Sub-millisecond end-to-end (client → gateway → engine → client)
-- **Deterministic**: Replay from journal produces same state
-- **Minimal allocations**: Hot path (matching) avoids allocations
-- **Fault tolerant**: Engine crashes don't lose data (journaling)
-- **Cost-efficient**: Pay for what you need (small servers for cold pairs)
-- **Horizontally scalable**: Add engines as you list new pairs
-- **Production-ready**: Monitoring, metrics, recovery, durability
-
----
-
-## Technology Stack
-
-- **Language**: Rust (low-latency, safety, performance)
-- **Async Runtime**: Tokio (connection handling, I/O)
-- **Serialization**: Postcard (compact binary), serde_json (debug)
-- **Persistence**: Custom journal + snapshots (deterministic replay)
-- **Networking**: LengthDelimitedCodec (battle-tested framing)
-- **Metrics**: Prometheus text format
-- **Time-Series DB**: ClickHouse (market data storage)
-- **Infrastructure**: AWS EC2 (Enhanced Networking, Cluster Placement Groups)
-- **Concurrency**: Crossbeam channels (lock-free), single-threaded engine (zero locks)
-
----
-
-## References & Inspiration
-
-- **Coinbase Exchange**: Gateway + matching engine architecture
-- **Binance**: Distributed order book servers
-- **LMAX Disruptor**: Single-threaded sequencer pattern
-- **Jane Street**: Tentative reservation pattern for risk
-- **Real-world trading systems**: Co-location, AWS placement groups, persistent TCP connections
-
----
-
-*Last Updated: 2026-02-05*
+**Last Updated:** 2026-02-10  
+**Version:** 0.1.0  
+**Status:** Core functionality complete, production deployment in progress

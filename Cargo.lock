@@ -462,6 +462,7 @@ dependencies = [
  "postcard",
  "serde",
  "slab",
+ "tokio",
  "tracing",
 ]
 
@@ -632,12 +633,14 @@ dependencies = [
  "clap",
  "codecs",
  "common",
+ "crc32fast",
  "crossbeam-channel",
  "dashmap",
  "futures",
  "persistence",
  "postcard",
  "serde",
+ "tempfile",
  "tokio",
  "tokio-util",
  "toml",

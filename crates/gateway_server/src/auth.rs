@@ -40,18 +40,21 @@ impl AuthService {
     }
 
     /// Check if an API key exists
+    #[allow(dead_code)]
     pub async fn has_api_key(&self, api_key: &str) -> bool {
         let keys = self.api_keys.read().await;
         keys.contains_key(api_key)
     }
 
     /// Revoke an API key (admin operation)
+    #[allow(dead_code)]
     pub async fn revoke_api_key(&self, api_key: &str) -> bool {
         let mut keys = self.api_keys.write().await;
         keys.remove(api_key).is_some()
     }
 
     /// Get total number of registered API keys
+    #[allow(dead_code)]
     pub async fn key_count(&self) -> usize {
         let keys = self.api_keys.read().await;
         keys.len()

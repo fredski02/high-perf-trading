@@ -19,6 +19,7 @@ pub async fn handle_gateway_connection(
     stream: TcpStream,
     engine_in: cb::Sender<Inbound>,
     engine_out: cb::Receiver<Outbound>,
+    query_tx: cb::Sender<engine::EngineQuery>, // Query channel for reconciliation
     metrics: Arc<Metrics>,
     max_frame: usize,
     symbol_id: u32,
@@ -43,59 +44,74 @@ pub async fn handle_gateway_connection(
 
     let (mut write_half, mut read_half) = framed.split();
 
+    // Channel for query responses (read loop will send responses here)
+    let (query_response_tx, mut query_response_rx) = tokio::sync::mpsc::unbounded_channel::<EngineToGateway>();
+
     // Spawn write loop to send events back to gateway
     let metrics_write = metrics.clone();
     let write_task = tokio::spawn(async move {
-        while let Ok(outbound) = engine_out.recv() {
-            // Wrap in EngineToGateway protocol
-            let gateway_event = EngineToGateway::client_event(
-                outbound.conn_id,
-                outbound.ev,
-                None, // TODO: Track risk tokens
-            );
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_micros(100));
+        loop {
+            tokio::select! {
+                // Poll engine events periodically
+                _ = interval.tick() => {
+                    while let Ok(outbound) = engine_out.try_recv() {
+                        // Wrap in EngineToGateway protocol
+                        let gateway_event = EngineToGateway::client_event(
+                            outbound.conn_id,
+                            outbound.ev,
+                            None, // TODO: Track risk tokens
+                        );
 
-            // Serialize with postcard
-            let serialized = match postcard::to_allocvec(&gateway_event) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    warn!("Failed to serialize EngineToGateway: {}", e);
-                    continue;
+                        // Serialize with postcard
+                        let serialized = match postcard::to_allocvec(&gateway_event) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                warn!("Failed to serialize EngineToGateway: {}", e);
+                                continue;
+                            }
+                        };
+
+                        // Use feed() instead of send() to avoid auto-flush
+                        if write_half.feed(Bytes::from(serialized)).await.is_err() {
+                            return;
+                        }
+
+                        metrics_write.inc_frames_out();
+                    }
+                    
+                    // Flush after processing all available events
+                    if write_half.flush().await.is_err() {
+                        return;
+                    }
                 }
-            };
-
-            // Use feed() instead of send() to avoid auto-flush
-            if write_half.feed(Bytes::from(serialized)).await.is_err() {
-                break;
-            }
-
-            metrics_write.inc_frames_out();
-
-            // Try to batch more events if available (non-blocking)
-            while let Ok(outbound) = engine_out.try_recv() {
-                let gateway_event =
-                    EngineToGateway::client_event(outbound.conn_id, outbound.ev, None);
-
-                let serialized = match postcard::to_allocvec(&gateway_event) {
-                    Ok(bytes) => bytes,
-                    Err(_) => continue,
-                };
-
-                if write_half.feed(Bytes::from(serialized)).await.is_err() {
-                    return;
+                
+                // Handle query responses
+                Some(response) = query_response_rx.recv() => {
+                    let serialized = match postcard::to_allocvec(&response) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            warn!("Failed to serialize query response: {}", e);
+                            continue;
+                        }
+                    };
+                    
+                    if write_half.feed(Bytes::from(serialized)).await.is_err() {
+                        break;
+                    }
+                    
+                    if write_half.flush().await.is_err() {
+                        break;
+                    }
+                    
+                    metrics_write.inc_frames_out();
                 }
-
-                metrics_write.inc_frames_out();
-            }
-
-            // Now flush once for the batch
-            if write_half.flush().await.is_err() {
-                break;
             }
         }
     });
 
     // Read loop: receive commands from gateway
-    let read_result = gateway_read_loop(&mut read_half, engine_in, metrics).await;
+    let read_result = gateway_read_loop(&mut read_half, query_response_tx, engine_in, query_tx, metrics).await;
 
     // Cleanup
     write_task.abort();
@@ -106,7 +122,9 @@ pub async fn handle_gateway_connection(
 /// Read loop: receives GatewayToEngine messages and forwards to engine
 async fn gateway_read_loop(
     read_half: &mut futures::stream::SplitStream<Framed<TcpStream, LengthDelimitedCodec>>,
+    query_response_tx: tokio::sync::mpsc::UnboundedSender<EngineToGateway>,
     engine_in: cb::Sender<Inbound>,
+    query_tx: cb::Sender<engine::EngineQuery>,
     metrics: Arc<Metrics>,
 ) -> Result<()> {
     while let Some(frame_result) = read_half.next().await {
@@ -143,6 +161,37 @@ async fn gateway_read_loop(
                 // Health check - respond with Pong
                 // TODO: Implement Pong response
                 tracing::debug!("Received ping from gateway");
+            }
+            GatewayToEngine::QueryAllOrders => {
+                // Query all orders request for reconciliation
+                tracing::debug!("Received QueryAllOrders from gateway");
+                
+                // Create oneshot channel for response
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                
+                // Send query to engine thread
+                let query = engine::EngineQuery::GetAllOrders { response_tx };
+                if let Err(e) = query_tx.send(query) {
+                    warn!("Failed to send query to engine: {}", e);
+                    continue;
+                }
+                
+                // Wait for response from engine thread
+                match response_rx.await {
+                    Ok(orders) => {
+                        tracing::info!("Received {} orders from engine, sending to gateway", orders.len());
+                        
+                        // Send AllOrders response back to gateway via channel
+                        let response = EngineToGateway::AllOrders(orders);
+                        if query_response_tx.send(response).is_err() {
+                            warn!("Failed to send AllOrders response to write loop");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Engine query failed: {}", e);
+                    }
+                }
             }
         }
     }

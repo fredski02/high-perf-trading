@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
     // Create channels for engine communication
     let (in_tx, in_rx) = cb::bounded::<Inbound>(args.ingress_cap);
     let (out_tx, out_rx) = cb::unbounded::<Outbound>();
+    let (query_tx, query_rx) = cb::unbounded::<engine::EngineQuery>(); // Query channel for reconciliation
 
     // Spawn engine thread
     let journal_config = JournalConfig {
@@ -61,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics_engine = metrics.clone();
     std::thread::spawn(move || {
-        let mut engine = Engine::new_with_config(in_rx, out_tx, metrics_engine, engine_config);
+        let mut engine = Engine::new_with_config(in_rx, out_tx, query_rx, metrics_engine, engine_config);
 
         // Restore from persistence
         if let Err(e) = engine.restore_from_persistence() {
@@ -84,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         stream,
         in_tx,
         out_rx,
+        query_tx, // Pass query channel to handle QueryAllOrders
         metrics,
         args.max_frame,
         args.symbol_id,

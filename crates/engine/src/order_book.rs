@@ -368,6 +368,32 @@ impl OrderBook {
 
         Ok(())
     }
+
+    /// Get snapshots of all active orders (for reconciliation)
+    pub fn get_all_order_snapshots(&self) -> Vec<common::OrderSnapshot> {
+        self.index
+            .iter()
+            .filter_map(|(order_id, slab_key)| {
+                self.orders.get(*slab_key).map(|order| {
+                    let reserved_amount = if order.side == common::Side::Buy {
+                        order.price * order.qty_rem
+                    } else {
+                        0  // Sells don't reserve buying power
+                    };
+
+                    common::OrderSnapshot {
+                        order_id: *order_id,
+                        account_id: order.account_id,
+                        symbol_id: order.symbol_id,
+                        side: order.side,
+                        price: order.price,
+                        qty_rem: order.qty_rem,
+                        reserved_amount,
+                    }
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

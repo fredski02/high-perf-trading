@@ -11,7 +11,7 @@ use tokio::{
 #[allow(unused_imports)]
 use common::Side;
 
-use common::{Ack, Command, Event, NewOrder, OrderFlags, RejectReason, TimeInForce};
+use common::{Ack, Authenticate, Command, Event, NewOrder, OrderFlags, RejectReason, TimeInForce};
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(long, default_value = "smoke-all")]
@@ -84,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
 
 async fn smoke_json(addr: &str) -> anyhow::Result<()> {
     let mut s = TcpStream::connect(addr).await?;
+    
+    // Authenticate first
+    authenticate_json(&mut s, "test-key-7").await?;
+    
     let cmd = Command::NewOrder(NewOrder {
         client_seq: 1,
         order_id: 1,
@@ -137,6 +141,9 @@ async fn smoke_bin(addr: &str) -> anyhow::Result<()> {
 // Rest ask 100 x 5, then buy 110 x 3 -> should Fill 3 @ 100, leave ask 100 x 2.
 async fn smoke_match_json(addr: &str) -> anyhow::Result<()> {
     let mut s = TcpStream::connect(addr).await?;
+    
+    // Authenticate first
+    authenticate_json(&mut s, "test-key-7").await?;
 
     // maker: sell 100 x5
     let ask = Command::NewOrder(NewOrder {
@@ -157,7 +164,7 @@ async fn smoke_match_json(addr: &str) -> anyhow::Result<()> {
     let buy = Command::NewOrder(NewOrder {
         client_seq: 2,
         order_id: 202,
-        account_id: 8,
+        account_id: 7,  // Same account as maker
         symbol_id: 1,
         side: Side::Buy,
         price: 110,
@@ -204,6 +211,9 @@ async fn smoke_match_json(addr: &str) -> anyhow::Result<()> {
 // Rest ask 100 x5, then post-only buy 110 x1 -> should Reject(PostOnlyWouldCross)
 async fn smoke_postonly_json(addr: &str) -> anyhow::Result<()> {
     let mut s = TcpStream::connect(addr).await?;
+    
+    // Authenticate first
+    authenticate_json(&mut s, "test-key-7").await?;
 
     // maker: sell 100 x5
     let ask = Command::NewOrder(NewOrder {
@@ -224,7 +234,7 @@ async fn smoke_postonly_json(addr: &str) -> anyhow::Result<()> {
     let po_buy = Command::NewOrder(NewOrder {
         client_seq: 2,
         order_id: 302,
-        account_id: 8,
+        account_id: 7,  // Same account as maker
         symbol_id: 1,
         side: Side::Buy,
         price: 110,
@@ -263,6 +273,9 @@ async fn smoke_postonly_json(addr: &str) -> anyhow::Result<()> {
 // Rest ask 100 x5, then IOC buy 110 x10 -> should Fill 5 @ 100, and book becomes empty (no ask).
 async fn smoke_ioc_json(addr: &str) -> anyhow::Result<()> {
     let mut s = TcpStream::connect(addr).await?;
+    
+    // Authenticate first
+    authenticate_json(&mut s, "test-key-7").await?;
 
     // maker: sell 100 x5
     let ask = Command::NewOrder(NewOrder {
@@ -283,7 +296,7 @@ async fn smoke_ioc_json(addr: &str) -> anyhow::Result<()> {
     let ioc_buy = Command::NewOrder(NewOrder {
         client_seq: 2,
         order_id: 402,
-        account_id: 8,
+        account_id: 7,  // Same account as maker
         symbol_id: 1,
         side: Side::Buy,
         price: 110,
@@ -813,6 +826,23 @@ async fn bench_gateway_throughput_binary(addr: &str, iters: u32) -> anyhow::Resu
 
 // -------------------- Helpers --------------------
 
+/// Authenticate with the gateway using JSON protocol
+async fn authenticate_json(s: &mut TcpStream, api_key: &str) -> anyhow::Result<()> {
+    let auth_cmd = Command::Authenticate(Authenticate {
+        api_key: api_key.to_string(),
+    });
+    
+    write_json_cmd(s, &auth_cmd).await?;
+    
+    // Read and verify AuthSuccess response
+    let event = read_json_event(s).await?;
+    match event {
+        Event::AuthSuccess(_) => Ok(()),
+        Event::AuthFailure(failure) => anyhow::bail!("Authentication failed: {}", failure.reason),
+        other => anyhow::bail!("Unexpected event after authentication: {:?}", other),
+    }
+}
+
 async fn write_json_cmd(s: &mut TcpStream, cmd: &Command) -> anyhow::Result<()> {
     let payload = serde_json::to_vec(cmd)?;
     let frame = frame(&payload);
@@ -937,6 +967,12 @@ async fn read_one_frame(s: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
     s.read_exact(&mut buf).await?;
     Ok(buf)
+}
+
+async fn read_json_event(s: &mut TcpStream) -> anyhow::Result<Event> {
+    let bytes = read_one_frame(s).await?;
+    let ev: Event = serde_json::from_slice(&bytes)?;
+    Ok(ev)
 }
 
 async fn read_until_ack_json(s: &mut TcpStream, client_seq: u64) -> anyhow::Result<Vec<Event>> {

@@ -50,6 +50,8 @@ Thumbs.db
 journal.bin
 snapshots
 **/*_journal.bin
+journals/**/*.bin
+journals
 # =========================================
 # Env / secrets
 # =========================================

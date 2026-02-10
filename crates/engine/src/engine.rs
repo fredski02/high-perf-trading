@@ -35,6 +35,7 @@ impl Default for EngineConfig {
 pub struct Engine {
     rx: Receiver<Inbound>,
     tx: Sender<Outbound>,
+    query_rx: Receiver<crate::types::EngineQuery>, // Query channel for reconciliation
     server_seq: u64,
     command_seq: u64, // Track commands for snapshots
 
@@ -51,13 +52,19 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(rx: Receiver<Inbound>, tx: Sender<Outbound>, metrics: Arc<Metrics>) -> Self {
-        Self::new_with_config(rx, tx, metrics, EngineConfig::default())
+    pub fn new(
+        rx: Receiver<Inbound>,
+        tx: Sender<Outbound>,
+        query_rx: Receiver<crate::types::EngineQuery>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self::new_with_config(rx, tx, query_rx, metrics, EngineConfig::default())
     }
 
     pub fn new_with_config(
         rx: Receiver<Inbound>,
         tx: Sender<Outbound>,
+        query_rx: Receiver<crate::types::EngineQuery>,
         metrics: Arc<Metrics>,
         config: EngineConfig,
     ) -> Self {
@@ -68,6 +75,7 @@ impl Engine {
         Self {
             rx,
             tx,
+            query_rx,
             server_seq: 1,
             command_seq: 0,
             book: OrderBook::new(1),
@@ -127,45 +135,76 @@ impl Engine {
         Ok(())
     }
 
+    /// Get snapshots of all active orders (for gateway reconciliation)
+    pub fn get_all_order_snapshots(&self) -> Vec<common::OrderSnapshot> {
+        self.book.get_all_order_snapshots()
+    }
+
     pub fn run(mut self) {
         info!("engine: starting");
 
-        while let Ok(inb) = self.rx.recv() {
-            self.metrics.queue_dec();
-            let conn_id = inb.conn_id;
+        loop {
+            crossbeam_channel::select! {
+                recv(self.rx) -> msg => {
+                    match msg {
+                        Ok(inb) => {
+                            self.metrics.queue_dec();
+                            let conn_id = inb.conn_id;
 
-            // Journal the command BEFORE processing
-            if let Err(e) = self.journal.append(&inb.cmd) {
-                warn!("journal append failed: {:#}", e);
-                // In production, you might reject the order here
-            }
+                            // Journal the command BEFORE processing
+                            if let Err(e) = self.journal.append(&inb.cmd) {
+                                warn!("journal append failed: {:#}", e);
+                                // In production, you might reject the order here
+                            }
 
-            let events = self.process(inb.cmd);
+                            let events = self.process(inb.cmd);
 
-            for ev in events {
-                if self.tx.send(Outbound { conn_id, ev }).is_err() {
-                    warn!("engine: outbound channel closed");
-                    return;
+                            for ev in events {
+                                if self.tx.send(Outbound { conn_id, ev }).is_err() {
+                                    warn!("engine: outbound channel closed");
+                                    return;
+                                }
+                            }
+
+                            self.command_seq += 1;
+
+                            // Periodic snapshot
+                            if self.config.snapshot_interval > 0
+                                && self.command_seq.is_multiple_of(self.config.snapshot_interval)
+                            {
+                                if let Err(e) = self.take_snapshot() {
+                                    warn!("snapshot failed: {:#}", e);
+                                }
+                            }
+
+                            // Journal rotation check
+                            if self.journal.should_rotate() {
+                                if let Err(e) = self.journal.rotate() {
+                                    warn!("journal rotation failed: {:#}", e);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            info!("engine: command channel closed");
+                            break;
+                        }
+                    }
                 }
-            }
-
-            self.command_seq += 1;
-
-            // Periodic snapshot
-            if self.config.snapshot_interval > 0
-                && self
-                    .command_seq
-                    .is_multiple_of(self.config.snapshot_interval)
-            {
-                if let Err(e) = self.take_snapshot() {
-                    warn!("snapshot failed: {:#}", e);
-                }
-            }
-
-            // Journal rotation check
-            if self.journal.should_rotate() {
-                if let Err(e) = self.journal.rotate() {
-                    warn!("journal rotation failed: {:#}", e);
+                recv(self.query_rx) -> msg => {
+                    match msg {
+                        Ok(crate::types::EngineQuery::GetAllOrders { response_tx }) => {
+                            // Get all order snapshots from the order book
+                            let orders = self.book.get_all_order_snapshots();
+                            info!("engine: responding to GetAllOrders query with {} orders", orders.len());
+                            
+                            // Send response back (ignore error if receiver dropped)
+                            let _ = response_tx.send(orders);
+                        }
+                        Err(_) => {
+                            info!("engine: query channel closed");
+                            // Don't break - continue processing commands
+                        }
+                    }
                 }
             }
         }

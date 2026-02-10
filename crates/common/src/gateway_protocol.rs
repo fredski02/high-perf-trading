@@ -14,6 +14,9 @@ pub enum GatewayToEngine {
 
     /// Health check / ping
     Ping,
+
+    /// Query all active orders from this engine (for reconciliation)
+    QueryAllOrders,
 }
 
 /// Command with risk approval metadata
@@ -42,6 +45,19 @@ pub struct RiskToken {
     pub gateway_seq: u64,
 }
 
+/// Snapshot of a single order (for reconciliation)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderSnapshot {
+    pub order_id: OrderId,
+    pub account_id: AccountId,
+    pub symbol_id: SymbolId,
+    pub side: crate::Side,
+    pub price: crate::Price,
+    pub qty_rem: crate::Qty,
+    /// Amount of buying power reserved for this order
+    pub reserved_amount: i64,
+}
+
 /// Events sent from engine back to gateway
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EngineToGateway {
@@ -65,6 +81,15 @@ pub enum EngineToGateway {
 
     /// Market data broadcast (BookTop, Trade)
     MarketData { symbol_id: SymbolId, event: Event },
+
+    /// Response to QueryAllOrders - all active orders in the engine
+    AllOrders(Vec<OrderSnapshot>),
+
+    /// Sent after engine restarts and recovers from persistence
+    EngineReady {
+        symbol_id: SymbolId,
+        orders: Vec<OrderSnapshot>,
+    },
 }
 
 impl GatewayToEngine {

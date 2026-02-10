@@ -29,6 +29,7 @@ impl SessionManager {
     }
 
     /// Get the account ID for a connection (if authenticated)
+    #[allow(dead_code)]
     pub async fn get_account_id(&self, conn_id: u64) -> Option<AccountId> {
         let sessions = self.sessions.read().await;
         sessions.get(&conn_id).copied()
@@ -47,12 +48,14 @@ impl SessionManager {
     }
 
     /// Get total number of active sessions
+    #[allow(dead_code)]
     pub async fn session_count(&self) -> usize {
         let sessions = self.sessions.read().await;
         sessions.len()
     }
 
     /// Get all active sessions
+    #[allow(dead_code)]
     pub async fn get_all_sessions(&self) -> HashMap<u64, AccountId> {
         let sessions = self.sessions.read().await;
         sessions.clone()

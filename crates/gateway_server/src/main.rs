@@ -3,6 +3,8 @@ mod auth;
 mod client_handler;
 mod config;
 mod engine_router;
+mod persistence;
+mod reconciliation;
 mod session;
 
 use std::collections::HashMap;
@@ -48,26 +50,81 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics = Arc::new(Metrics::default());
 
-    // Initialize account manager
-    let account_manager = Arc::new(AccountManager::new());
-
     // Initialize authentication service
     let auth_service = Arc::new(AuthService::new());
 
     // Initialize session manager
     let session_manager = Arc::new(SessionManager::new());
 
-    // TODO: Load accounts from snapshot/journal
-    // For now, create test accounts with API keys
-    for account_id in 1..=10 {
-        account_manager.create_account(account_id, 1_000_000); // Each account with $1M buying power
+    // Initialize account manager with persistence
+    let account_manager = {
+        // Open journal for persistence
+        let journal_config = persistence::JournalConfig {
+            batch_size: args.journal_batch_size,
+            sync_interval: std::time::Duration::from_millis(100),
+        };
         
-        // Register API key for each account (format: "test-key-{account_id}")
-        let api_key = format!("test-key-{}", account_id);
-        auth_service.register_api_key(api_key.clone(), account_id).await;
+        let mut journal = persistence::AccountJournal::open_with_config(&args.journal_path, journal_config)?;
+        
+        // Try to load latest snapshot
+        let snapshot = persistence::AccountSnapshot::load_latest(&args.snapshot_dir)?;
+        
+        let account_manager = if let Some(snapshot) = snapshot {
+            tracing::info!(
+                "Loaded snapshot (seq={}, accounts={})",
+                snapshot.sequence,
+                snapshot.accounts.len()
+            );
+            
+            // Read journal and replay updates after snapshot
+            let updates = journal.read_all()?;
+            tracing::info!("Loaded {} updates from journal", updates.len());
+            
+            let mgr = Arc::new(AccountManager::with_journal(journal));
+            mgr.restore_from_snapshot(&snapshot);
+            mgr.replay_journal(updates);
+            
+            mgr
+        } else {
+            tracing::info!("No snapshot found, starting with empty state");
+            
+            // Read journal (if any) and replay
+            let updates = journal.read_all()?;
+            if !updates.is_empty() {
+                tracing::info!("Loaded {} updates from journal", updates.len());
+            }
+            
+            let mgr = Arc::new(AccountManager::with_journal(journal));
+            mgr.replay_journal(updates);
+            
+            mgr
+        };
+        
+        account_manager
+    };
+
+    // Create test accounts with API keys (only if no accounts exist)
+    let account_count = account_manager.create_snapshot(0).accounts.len();
+    if account_count == 0 {
+        tracing::info!("No accounts found, creating 10 test accounts");
+        for account_id in 1..=10 {
+            account_manager.create_account(account_id, 1_000_000); // Each account with $1M buying power
+            
+            // Register API key for each account (format: "test-key-{account_id}")
+            let api_key = format!("test-key-{}", account_id);
+            auth_service.register_api_key(api_key.clone(), account_id).await;
+        }
+        tracing::info!("Created 10 test accounts (id=1-10), each with buying_power=1000000");
+        tracing::info!("Registered 10 test API keys (test-key-1 through test-key-10)");
+    } else {
+        tracing::info!("Recovered {} accounts from persistence", account_count);
+        
+        // Still register test API keys for recovered accounts
+        for account_id in 1..=10 {
+            let api_key = format!("test-key-{}", account_id);
+            auth_service.register_api_key(api_key.clone(), account_id).await;
+        }
     }
-    tracing::info!("Created 10 test accounts (id=1-10), each with buying_power=1000000");
-    tracing::info!("Registered 10 test API keys (test-key-1 through test-key-10)");
 
     // Load engine configuration and connect
     let engines_config = EnginesConfig::from_file(&args.engines_config)?;
@@ -92,6 +149,20 @@ async fn main() -> anyhow::Result<()> {
         engine_router.num_connections().await
     );
 
+    // Reconcile reservation state with engines
+    tracing::info!("Reconciling reservation state with engines...");
+    let reconciliation = reconciliation::Reconciliation::new(
+        account_manager.clone(),
+        engine_router.clone(),
+    );
+    
+    if let Err(e) = reconciliation.rebuild_reservations().await {
+        tracing::error!("Reconciliation failed: {}", e);
+        tracing::warn!("Continuing with empty reservation state");
+    } else {
+        tracing::info!("Reservation reconciliation complete");
+    }
+
     // Create gateway context
     let ctx = Arc::new(GatewayContext {
         account_manager,
@@ -115,6 +186,48 @@ async fn main() -> anyhow::Result<()> {
     let client_senders_responses = client_senders.clone();
     tokio::spawn(async move {
         handle_engine_responses(ctx_responses, client_senders_responses).await;
+    });
+
+    // Spawn periodic snapshot task
+    let ctx_snapshot = ctx.clone();
+    let snapshot_dir = args.snapshot_dir.clone();
+    let snapshot_interval = args.snapshot_interval;
+    tokio::spawn(async move {
+        let mut updates_since_snapshot = 0u64;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        
+        loop {
+            interval.tick().await;
+            
+            // Check if we should create a snapshot
+            updates_since_snapshot += 1;
+            
+            if updates_since_snapshot >= snapshot_interval / 60 {
+                let sequence = updates_since_snapshot;
+                let snapshot = ctx_snapshot.account_manager.create_snapshot(sequence);
+                
+                match snapshot.save(&snapshot_dir) {
+                    Ok(path) => {
+                        tracing::info!("Snapshot saved: {:?}", path);
+                        
+                        // Cleanup old snapshots (keep last 3)
+                        if let Err(e) = persistence::AccountSnapshot::cleanup_old(&snapshot_dir, 3) {
+                            tracing::warn!("Failed to cleanup old snapshots: {}", e);
+                        }
+                        
+                        updates_since_snapshot = 0;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to save snapshot: {}", e);
+                    }
+                }
+                
+                // Flush journal
+                if let Err(e) = ctx_snapshot.account_manager.flush_journal() {
+                    tracing::error!("Failed to flush journal: {}", e);
+                }
+            }
+        }
     });
 
     // Spawn TCP listeners for clients
