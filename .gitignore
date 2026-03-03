@@ -52,6 +52,9 @@ snapshots
 **/*_journal.bin
 journals/**/*.bin
 journals
+perf.data
+perf.data.*
+profile.json.gz
 # =========================================
 # Env / secrets
 # =========================================

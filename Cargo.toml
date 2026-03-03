@@ -48,3 +48,9 @@ once_cell = "1"
 # benches
 criterion = "0.8.1"
 tempfile = "3"
+
+# Profile configuration for better profiling
+[profile.release]
+debug = 1  # Enable line-level debug symbols for profiling (minimal size impact)
+strip = false  # Don't strip symbols
+# debug = 2  # Uncomment for full debug info (larger binaries, better stack traces)
